@@ -32,7 +32,6 @@ SAVE_PATH="${BASE_PATH}/results/${TYPE}"
 # seed
 SEED=10
 
-
 OPTS=""
 # type
 OPTS+=" --type ${TYPE}"

@@ -1,8 +1,8 @@
 #! /bin/bash
 
-BASE_PATH=${1-"/home/MiniPLM"}
+BASE_PATH=${1-"/data/jykim/MiniPLM"}
 MASTER_PORT=${2-2030}
-GPUS_PER_NODE=${3-8}
+GPUS_PER_NODE=${3-4}
 NNODES=1
 # HOSTFILE=${5-hostfile_8V100_0_1}
 
@@ -14,17 +14,17 @@ DISTRIBUTED_ARGS="--num_gpus $GPUS_PER_NODE \
 # type
 TYPE="pretrain"
 # model
-CKPT_NAME="qwen/200M"
+CKPT_NAME="qwen/200M_pretrained"
 CKPT="${BASE_PATH}/checkpoints/${CKPT_NAME}/"
 # data
-DATA_DIR="${BASE_PATH}/processed_data/pretrain/pile/qwen-1025"
-DATA_NAME="pile"
+DATA_DIR="/data/jykim/DB/miniplm_refined_corpus"
+DATA_NAME="dolly"
 WANDB_NAME="200M-pretrain"
 # hp
-BATCH_SIZE=8
+BATCH_SIZE=1
 LR=0.0006
 LR_MIN=0.00006
-GRAD_ACC=8
+GRAD_ACC=64
 # length
 MAX_LENGTH=1024
 # runtime
@@ -64,7 +64,7 @@ OPTS+=" --clip-grad 1.0"
 OPTS+=" --adam-beta 0.9"
 OPTS+=" --adam-beta2 0.98"
 OPTS+=" --adam-eps 1e-6"
-OPTS+=" --total-iters 100000"
+OPTS+=" --total-iters 10"
 # length
 OPTS+=" --max-length ${MAX_LENGTH}"
 # runtime
