@@ -11,6 +11,7 @@ from utils import print_args, initialize, save_rank
 
 from pretrain.trainer import PreTrainer
 from vanilla_kd.trainer import VanillaKDPreTrainer
+from offline_kd.trainer import OfflineKDPreTrainer
 
 
 torch.set_num_threads(16)
@@ -49,6 +50,8 @@ def main():
         trainer = PreTrainer(args, ds_config, device, args.do_train)
     elif args.type == "vanilla_kd":
         trainer = VanillaKDPreTrainer(args, ds_config, device, args.do_train)
+    elif args.type == "offline_kd":
+        trainer = OfflineKDPreTrainer(args, ds_config, device, args.do_train)
     else:
         raise NotImplementedError(f"Type {args.type} not implemented.")
     

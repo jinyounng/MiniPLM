@@ -14,7 +14,7 @@ OUTPUT_DIR="/data/jykim/DB/miniplm_refined_corpus_logits_topk"
 
 # Sampling parameters
 TOPK=50
-BATCH_SIZE=8
+BATCH_SIZE=512
 MAX_LENGTH=1024
 
 # Processing range (shard 단위로 resume 가능)

@@ -226,6 +226,17 @@ def add_kd_args(parser: argparse.ArgumentParser):
     
     group.add_argument("--kd-ratio", type=float, default=0.5)
     
+    # Offline KD arguments
+    group.add_argument("--cached-logits-dir", type=str, default=None,
+                       help='Directory containing cached sparse teacher logits (for offline_kd)')
+    group.add_argument("--alpha", type=float, default=0.5,
+                       help='KD loss weight (0~1, higher = more weight on KD loss)')
+    group.add_argument("--kd-temperature", type=float, default=1.0,
+                       help='Temperature scaling for KD loss')
+    group.add_argument("--kd-method", type=str, default='topk',
+                       choices=['topk', 'sparse'],
+                       help='Which method to use when cached logits are "both" (topk or sparse)')
+    
     return parser
 
 
@@ -305,6 +316,21 @@ def get_args():
             base_model_suffix(args),
             base_training_hp_suffix(args) + (f"-scr" if args.from_scratch else ""),
             f"{args.teacher_ckpt_name.replace('/', '_')}" + f"-kd{args.kd_ratio}" + args.save_additional_suffix,
+        )
+    elif args.type == "offline_kd":
+        # Extract method from cached_logits_dir (topk or sparse)
+        logits_method = "topk"  # default
+        if args.cached_logits_dir:
+            if "sparse" in args.cached_logits_dir:
+                logits_method = "sparse"
+            elif "topk" in args.cached_logits_dir:
+                logits_method = "topk"
+        args.save = os.path.join(
+            args.save,
+            base_data_suffix(args),
+            base_model_suffix(args),
+            base_training_hp_suffix(args) + (f"-scr" if args.from_scratch else ""),
+            f"offline-{logits_method}-a{args.alpha}" + args.save_additional_suffix,
         )
     elif args.type == "seqkd":
         args.save = os.path.join(

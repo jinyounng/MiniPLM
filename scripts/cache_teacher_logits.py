@@ -56,8 +56,8 @@ def parse_args():
     
     # Sampling method
     parser.add_argument('--method', type=str, default='topk',
-                        choices=['topk', 'random'],
-                        help='Sampling method: topk or random')
+                        choices=['topk', 'random', 'both'],
+                        help='Sampling method: topk, random, or both (saves both simultaneously)')
     parser.add_argument('--topk', type=int, default=50,
                         help='K for top-k sampling')
     parser.add_argument('--num-samples', type=int, default=50,
@@ -73,7 +73,8 @@ def parse_args():
     parser.add_argument('--end-shard', type=int, default=-1,
                         help='Ending shard index (-1 for all)')
     parser.add_argument('--device', type=str, default='cuda',
-                        help='Device to use')
+                        choices=['cuda', 'auto'],
+                        help='Device to use: cuda (single GPU) or auto (multi-GPU auto-distribute)')
     parser.add_argument('--dtype', type=str, default='bf16',
                         choices=['fp32', 'fp16', 'bf16'],
                         help='Model dtype')
@@ -117,7 +118,14 @@ def get_shard_paths(data_dir: str, prefix: str = 'data'):
 
 
 def load_teacher_model(model_path: str, device: str, dtype: str):
-    """Teacher 모델 로드"""
+    """
+    Teacher 모델 로드
+    
+    Args:
+        device: 'cuda' 또는 'auto'
+                - 'cuda': 단일 GPU 사용
+                - 'auto': 자동으로 여러 GPU에 분산 (CUDA_VISIBLE_DEVICES에 따라)
+    """
     print(f"Loading teacher model from {model_path}...")
     
     dtype_map = {
@@ -127,10 +135,18 @@ def load_teacher_model(model_path: str, device: str, dtype: str):
     }
     torch_dtype = dtype_map[dtype]
     
+    # GPU 분산 설정
+    if device == 'auto' or (device == 'cuda' and torch.cuda.device_count() > 1):
+        # 여러 GPU 사용 가능하면 자동 분산
+        device_map = 'auto'
+        print(f"  Using device_map='auto' for multi-GPU ({torch.cuda.device_count()} GPUs)")
+    else:
+        device_map = device
+    
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         torch_dtype=torch_dtype,
-        device_map=device,
+        device_map=device_map,
         trust_remote_code=True
     )
     model.eval()
@@ -139,6 +155,12 @@ def load_teacher_model(model_path: str, device: str, dtype: str):
         model_path,
         trust_remote_code=True
     )
+    
+    # GPU 분산 정보 출력
+    if hasattr(model, 'hf_device_map') and model.hf_device_map:
+        print(f"  Model distributed across devices: {model.hf_device_map}")
+    else:
+        print(f"  Model on device: {next(model.parameters()).device}")
     
     print(f"Teacher model loaded: {model.config.num_hidden_layers} layers, "
           f"vocab_size={model.config.vocab_size}")
@@ -153,7 +175,8 @@ def process_shard(
     shard_id: int,
     global_offset: int,
     output_dir: str,
-    sampler,
+    sampler_topk,
+    sampler_sparse,
     args
 ):
     """
@@ -212,8 +235,17 @@ def process_shard(
                 attention_mask[i, :len(seq)] = 1
             
             # Convert to tensor
-            input_ids = torch.tensor(padded_batch, device=args.device, dtype=torch.long)
-            attn_mask = torch.tensor(attention_mask, device=args.device, dtype=torch.long)
+            # device_map='auto'일 때는 모델의 첫 번째 레이어 디바이스 사용
+            if hasattr(model, 'hf_device_map') and model.hf_device_map:
+                # Multi-GPU: 첫 번째 레이어가 있는 디바이스 사용
+                first_device = list(model.hf_device_map.values())[0]
+                device_for_input = first_device
+            else:
+                # Single GPU: args.device 사용
+                device_for_input = args.device if args.device != 'auto' else 'cuda'
+            
+            input_ids = torch.tensor(padded_batch, device=device_for_input, dtype=torch.long)
+            attn_mask = torch.tensor(attention_mask, device=device_for_input, dtype=torch.long)
             
             # ✅ Teacher forward with error handling
             try:
@@ -229,14 +261,43 @@ def process_shard(
                     
                     # Only use valid positions (non-padded)
                     valid_probs = seq_probs[:orig_len]
-                    sparse_data = sampler.sample(valid_probs)
                     
-                    # 저장할 인덱스 정보
-                    sparse_data['local_idx'] = local_idx      # shard 내 인덱스
-                    sparse_data['global_idx'] = global_idx    # 전체 데이터셋 인덱스 (매칭용)
-                    sparse_data['shard_id'] = shard_id        # shard 번호 (검증용)
-                    sparse_data['seq_len'] = orig_len
-                    all_sparse_data.append(sparse_data)
+                    # ✅ Method에 따라 샘플링 (both면 둘 다)
+                    if args.method == 'both':
+                        # Top-K와 Random Sampling 둘 다 수행
+                        topk_data = sampler_topk.sample(valid_probs)
+                        sparse_data = sampler_sparse.sample(valid_probs)
+                        
+                        # 두 결과를 하나의 dict로 합치기
+                        combined_data = {
+                            'topk': {
+                                'token_ids': topk_data['token_ids'],
+                                'probs': topk_data['probs'],
+                                'k': topk_data['k']
+                            },
+                            'sparse': {
+                                'token_ids': sparse_data['token_ids'],
+                                'counts': sparse_data['counts'],
+                                'lengths': sparse_data['lengths'],
+                                'num_samples': sparse_data['num_samples']
+                            },
+                            'local_idx': local_idx,
+                            'global_idx': global_idx,
+                            'shard_id': shard_id,
+                            'seq_len': orig_len,
+                            'method': 'both'
+                        }
+                        all_sparse_data.append(combined_data)
+                    else:
+                        # 기존 방식 (하나만)
+                        sparse_data = sampler_topk.sample(valid_probs) if args.method == 'topk' else sampler_sparse.sample(valid_probs)
+                        
+                        # 저장할 인덱스 정보
+                        sparse_data['local_idx'] = local_idx
+                        sparse_data['global_idx'] = global_idx
+                        sparse_data['shard_id'] = shard_id
+                        sparse_data['seq_len'] = orig_len
+                        all_sparse_data.append(sparse_data)
                     
             except RuntimeError as e:
                 failed_batches += 1
@@ -275,51 +336,89 @@ def save_sparse_data(sparse_data_list: list, output_path: str, method: str, shar
     Sparse data를 npz 형식으로 저장
     
     저장 형식:
-    - token_ids: [num_seqs] of [seq_len, K] arrays
-    - values: [num_seqs] of [seq_len, K] arrays (probs or counts)
-    - global_indices: [num_seqs] - 전체 데이터셋에서의 인덱스 (학습 시 매칭용) ✅
-    - local_indices: [num_seqs] - shard 내 인덱스
-    - seq_lens: [num_seqs] - 각 시퀀스의 실제 길이
-    - shard_id: int - shard 번호
-    - global_offset: int - 이 shard의 global index 시작점
+    - method='both': topk와 sparse 둘 다 저장
+    - method='topk' or 'random': 하나만 저장
     """
-    # Collect all arrays
-    all_token_ids = []
-    all_values = []  # counts for random, probs for topk
-    all_lengths = []  # for random sampling only
     all_seq_lens = []
     all_local_indices = []
     all_global_indices = []
     
-    for data in sparse_data_list:
-        all_token_ids.append(data['token_ids'])
-        all_seq_lens.append(data['seq_len'])
-        all_local_indices.append(data['local_idx'])
-        all_global_indices.append(data['global_idx'])
+    if method == 'both':
+        # Top-K와 Sparse 둘 다 저장
+        all_topk_token_ids = []
+        all_topk_probs = []
+        all_sparse_token_ids = []
+        all_sparse_counts = []
+        all_sparse_lengths = []
+        
+        for data in sparse_data_list:
+            all_seq_lens.append(data['seq_len'])
+            all_local_indices.append(data['local_idx'])
+            all_global_indices.append(data['global_idx'])
+            
+            # Top-K 데이터
+            all_topk_token_ids.append(data['topk']['token_ids'])
+            all_topk_probs.append(data['topk']['probs'])
+            
+            # Sparse 데이터
+            all_sparse_token_ids.append(data['sparse']['token_ids'])
+            all_sparse_counts.append(data['sparse']['counts'])
+            all_sparse_lengths.append(data['sparse']['lengths'])
+        
+        save_dict = {
+            # Top-K
+            'topk_token_ids': np.array(all_topk_token_ids, dtype=object),
+            'topk_probs': np.array(all_topk_probs, dtype=object),
+            'topk_k': np.int16(sparse_data_list[0]['topk']['k']),
+            
+            # Sparse (Random Sampling)
+            'sparse_token_ids': np.array(all_sparse_token_ids, dtype=object),
+            'sparse_counts': np.array(all_sparse_counts, dtype=object),
+            'sparse_lengths': np.array(all_sparse_lengths, dtype=object),
+            'sparse_num_samples': np.int16(sparse_data_list[0]['sparse']['num_samples']),
+            
+            # 공통
+            'seq_lens': np.array(all_seq_lens, dtype=np.int32),
+            'local_indices': np.array(all_local_indices, dtype=np.int32),
+            'global_indices': np.array(all_global_indices, dtype=np.int64),
+            'shard_id': np.int32(shard_id),
+            'global_offset': np.int64(global_offset),
+            'method': np.array('both'),
+        }
+    else:
+        # 기존 방식 (하나만)
+        all_token_ids = []
+        all_values = []
+        all_lengths = []
+        
+        for data in sparse_data_list:
+            all_token_ids.append(data['token_ids'])
+            all_seq_lens.append(data['seq_len'])
+            all_local_indices.append(data['local_idx'])
+            all_global_indices.append(data['global_idx'])
+            
+            if method == 'random':
+                all_values.append(data['counts'])
+                all_lengths.append(data['lengths'])
+            else:  # topk
+                all_values.append(data['probs'])
+        
+        save_dict = {
+            'token_ids': np.array(all_token_ids, dtype=object),
+            'values': np.array(all_values, dtype=object),
+            'seq_lens': np.array(all_seq_lens, dtype=np.int32),
+            'local_indices': np.array(all_local_indices, dtype=np.int32),
+            'global_indices': np.array(all_global_indices, dtype=np.int64),
+            'shard_id': np.int32(shard_id),
+            'global_offset': np.int64(global_offset),
+            'method': np.array(method),
+        }
         
         if method == 'random':
-            all_values.append(data['counts'])
-            all_lengths.append(data['lengths'])
+            save_dict['lengths'] = np.array(all_lengths, dtype=object)
+            save_dict['num_samples'] = np.array(sparse_data_list[0]['num_samples'])
         else:
-            all_values.append(data['probs'])
-    
-    # Save as compressed npz
-    save_dict = {
-        'token_ids': np.array(all_token_ids, dtype=object),
-        'values': np.array(all_values, dtype=object),
-        'seq_lens': np.array(all_seq_lens, dtype=np.int32),
-        'local_indices': np.array(all_local_indices, dtype=np.int32),
-        'global_indices': np.array(all_global_indices, dtype=np.int64),  # ✅ 학습 시 매칭용
-        'shard_id': np.int32(shard_id),
-        'global_offset': np.int64(global_offset),
-        'method': np.array(method),
-    }
-    
-    if method == 'random':
-        save_dict['lengths'] = np.array(all_lengths, dtype=object)
-        save_dict['num_samples'] = np.array(sparse_data_list[0]['num_samples'])
-    else:
-        save_dict['k'] = np.array(sparse_data_list[0]['k'])
+            save_dict['k'] = np.array(sparse_data_list[0]['k'])
     
     np.savez_compressed(output_path, **save_dict)
 
@@ -412,19 +511,26 @@ def main():
         print(f"  Set pad_token_id to eos_token_id: {tokenizer.pad_token_id}")
     print(f"  Using pad_token_id: {tokenizer.pad_token_id}")
     
-    # Initialize sampler
-    if args.method == 'topk':
-        sampler = TopKSampler(k=args.topk)
+    # Initialize samplers
+    if args.method == 'both':
+        sampler_topk = TopKSampler(k=args.topk)
+        sampler_sparse = SparseLogitSampler(num_samples=args.num_samples)
+        print(f"Using BOTH methods: Top-K (K={args.topk}) + Random Sampling (N={args.num_samples})")
+        print(f"  → Teacher forward 한 번으로 둘 다 저장 (시간 절약!)")
+    elif args.method == 'topk':
+        sampler_topk = TopKSampler(k=args.topk)
+        sampler_sparse = None
         print(f"Using Top-K sampling (K={args.topk})")
-    else:
-        sampler = SparseLogitSampler(num_samples=args.num_samples)
+    else:  # random
+        sampler_topk = None
+        sampler_sparse = SparseLogitSampler(num_samples=args.num_samples)
         print(f"Using Random Sampling (N={args.num_samples})")
     
     # Save metadata (shard 정보 포함)
     metadata = {
         'method': args.method,
-        'topk': args.topk if args.method == 'topk' else None,
-        'num_samples': args.num_samples if args.method == 'random' else None,
+        'topk': args.topk if args.method in ['topk', 'both'] else None,
+        'num_samples': args.num_samples if args.method in ['random', 'both'] else None,
         'teacher_model': args.teacher_model_path,
         'vocab_size': vocab_size,
         'max_length': args.max_length,
@@ -453,7 +559,8 @@ def main():
             shard_id=shard_id,
             global_offset=global_offset,
             output_dir=args.output_dir,
-            sampler=sampler,
+            sampler_topk=sampler_topk,
+            sampler_sparse=sampler_sparse,
             args=args
         )
     
