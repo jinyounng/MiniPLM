@@ -63,6 +63,6 @@ class LMHarnessEvaluator(BaseEvaluator):
             save_rank(json.dumps(res, indent=4),
                       os.path.join(self.output_path, "log.txt"))
             save_rank("\n\n\n", os.path.join(self.output_path, "log.txt"))
-            torch.save(results, os.path.join(self.output_path, f"results_{time_tag}.pt"))
+            torch.save(res, os.path.join(self.output_path, f"results_{time_tag}.pt"))
 
         return results

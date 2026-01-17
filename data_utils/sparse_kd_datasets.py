@@ -50,9 +50,10 @@ class SparseKDLMDataset(LMDataset):
         # Cached logits 로드
         self.cached_logits_dir = cached_logits_dir
         self.sparse_logits_loaded = False
-        # LRU cache: 최대 10개 shard만 메모리에 유지
+        # LRU cache: 최대 2개 shard만 메모리에 유지
+        # (800 GiB × 2 = 1600 GiB < 2000 GiB RAM)
         self.sparse_logits_cache = OrderedDict()  # shard_id -> npz data
-        self.max_cache_size = 10
+        self.max_cache_size = 2
         
         if cached_logits_dir is not None:
             self._load_cached_logits_metadata()
@@ -312,19 +313,23 @@ class SparseKDLMDataset(LMDataset):
             max_k = max(sl['token_ids'].shape[1] for sl in valid_sparse_logits)
             
             bs = len(samples)
+            
+            # ★ 실제 사용하는 method 확인 (both일 때도 topk/random 중 하나)
+            actual_method = valid_sparse_logits[0]['method']  # 'topk' or 'random'
+            
             batch_sparse_logits = {
                 'token_ids': np.full((bs, max_seq_len, max_k), -1, dtype=np.int32),
                 'values': np.zeros((bs, max_seq_len, max_k), dtype=np.float32),
                 'seq_lens': np.array([sl['seq_len'] if sl is not None else 0 for sl in sparse_logits_list], dtype=np.int32),
-                'method': valid_sparse_logits[0]['method'],
+                'method': actual_method,  # ★ 변경: 실제 사용하는 method
                 'valid_mask': np.array([sl is not None for sl in sparse_logits_list], dtype=bool),
             }
             
-            # Random sampling의 경우
-            if self.logits_method == 'random':
+            # ★ actual_method로 분기 (both일 때도 올바르게 처리)
+            if actual_method == 'random':
                 batch_sparse_logits['lengths'] = np.zeros((bs, max_seq_len), dtype=np.int16)
                 batch_sparse_logits['num_samples'] = valid_sparse_logits[0]['num_samples']
-            else:
+            else:  # topk
                 batch_sparse_logits['k'] = valid_sparse_logits[0]['k']
             
             # 각 샘플의 sparse logits를 배치에 맞게 패딩
@@ -339,7 +344,8 @@ class SparseKDLMDataset(LMDataset):
                 batch_sparse_logits['token_ids'][i, :seq_len, :k] = sparse_logits['token_ids'][:seq_len, :k]
                 batch_sparse_logits['values'][i, :seq_len, :k] = sparse_logits['values'][:seq_len, :k]
                 
-                if self.logits_method == 'random' and 'lengths' in sparse_logits:
+                # ★ actual_method로 분기
+                if actual_method == 'random' and 'lengths' in sparse_logits:
                     batch_sparse_logits['lengths'][i, :seq_len] = sparse_logits['lengths'][:seq_len]
             
             # Convert to torch tensors
@@ -348,13 +354,14 @@ class SparseKDLMDataset(LMDataset):
                 'values': torch.from_numpy(batch_sparse_logits['values']),
                 'seq_lens': torch.from_numpy(batch_sparse_logits['seq_lens']),
                 'valid_mask': torch.from_numpy(batch_sparse_logits['valid_mask']),
-                'method': batch_sparse_logits['method'],
+                'method': actual_method,  # ★ 변경
             }
             
-            if self.logits_method == 'random':
+            # ★ actual_method로 분기
+            if actual_method == 'random':
                 no_model_batch['sparse_logits']['lengths'] = torch.from_numpy(batch_sparse_logits['lengths'])
                 no_model_batch['sparse_logits']['num_samples'] = batch_sparse_logits['num_samples']
-            else:
+            else:  # topk
                 no_model_batch['sparse_logits']['k'] = batch_sparse_logits['k']
         else:
             # No sparse logits available

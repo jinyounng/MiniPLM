@@ -167,3 +167,5 @@ debug
 downstream_data
 wandb
 checkpoints
+
+lm-evaluation-harness/

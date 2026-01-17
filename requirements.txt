@@ -2,6 +2,7 @@ numpy==1.26.4
 torch
 transformers
 deepspeed
+tqdm
 numerize
 accelerate
 datasets

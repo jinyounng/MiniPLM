@@ -74,6 +74,58 @@ class SparseLogitSampler:
             'lengths': lengths               # [seq_len]
         }
     
+    def sample_flat(self, probs_flat: torch.Tensor) -> Dict[str, np.ndarray]:
+        """
+        벡터화된 배치 샘플링 (속도 최적화)
+        
+        Args:
+            probs_flat: [N, vocab_size] where N = batch_size * seq_len
+        
+        Returns:
+            {
+                'token_ids': [N, max_unique] - 샘플링된 토큰 ID (padded with -1)
+                'counts': [N, max_unique] - 각 토큰의 발생 횟수 (padded with 0)
+                'num_samples': int - 총 샘플 수
+                'lengths': [N] - 각 position의 실제 unique 토큰 수
+            }
+        """
+        N = probs_flat.shape[0]
+        
+        # 한번에 모든 position에 대해 multinomial 샘플링
+        # [N, num_samples]
+        samples = torch.multinomial(probs_flat, self.num_samples, replacement=True)
+        
+        # 각 row마다 unique 토큰과 카운트 계산
+        # PyTorch는 완전 벡터화된 unique가 어려우므로 작은 루프 사용
+        # 하지만 multinomial은 1회만 호출하므로 기존 대비 대폭 개선
+        all_token_ids = []
+        all_counts = []
+        
+        samples_cpu = samples.cpu()  # CPU로 한번에 이동 (동기화 1회)
+        for i in range(N):
+            unique_ids, counts = torch.unique(samples_cpu[i], return_counts=True)
+            all_token_ids.append(unique_ids.numpy())
+            all_counts.append(counts.numpy())
+        
+        # Padding
+        max_unique = max(len(ids) for ids in all_token_ids) if all_token_ids else 0
+        lengths = np.array([len(ids) for ids in all_token_ids], dtype=np.int16)
+        
+        # -1로 패딩 (유효하지 않은 토큰 표시)
+        token_ids_padded = np.full((N, max_unique), -1, dtype=np.int32)
+        counts_padded = np.zeros((N, max_unique), dtype=np.uint8)
+        
+        for i, (ids, cnts) in enumerate(zip(all_token_ids, all_counts)):
+            token_ids_padded[i, :len(ids)] = ids
+            counts_padded[i, :len(cnts)] = cnts
+        
+        return {
+            'token_ids': token_ids_padded,  # [N, max_unique]
+            'counts': counts_padded,         # [N, max_unique]
+            'num_samples': np.int16(self.num_samples),
+            'lengths': lengths               # [N]
+        }
+    
     def sample_batch(self, probs: torch.Tensor) -> Dict[str, np.ndarray]:
         """
         배치 단위 샘플링 (더 효율적)

@@ -375,7 +375,13 @@ class BaseTrainer():
                 self.train_sampler.set_epoch(epoch)
             self.train_dataset.set_epoch(epoch)
             self.preepoch_callback()
-            for it, (model_batch, no_model_batch) in enumerate(self.train_dataloader):
+            progress_bar = tqdm(
+                self.train_dataloader,
+                desc=f"Epoch {epoch+1}/{self.epochs}",
+                disable=(self.dp_rank != 0),
+                dynamic_ncols=True,
+            )
+            for it, (model_batch, no_model_batch) in enumerate(progress_bar):
                 if self.args.resume_training or (self.args.start_from_global_step is not None):
                     if self.global_steps <= self.last_global_steps:
                         if (self.steps % self.args.gradient_accumulation_steps == 0) and (self.global_steps % 1000 == 0):

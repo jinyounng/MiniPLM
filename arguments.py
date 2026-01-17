@@ -237,6 +237,12 @@ def add_kd_args(parser: argparse.ArgumentParser):
                        choices=['topk', 'sparse'],
                        help='Which method to use when cached logits are "both" (topk or sparse)')
     
+    # Sparse KD arguments (for sparse_kd type - online sparse KD)
+    group.add_argument("--topk", type=int, default=50,
+                       help='K value for Top-K sparse KD (number of top tokens to use)')
+    group.add_argument("--num-samples", type=int, default=50,
+                       help='N value for Random Sampling sparse KD (number of samples per position)')
+    
     return parser
 
 
@@ -331,6 +337,20 @@ def get_args():
             base_model_suffix(args),
             base_training_hp_suffix(args) + (f"-scr" if args.from_scratch else ""),
             f"offline-{logits_method}-a{args.alpha}" + args.save_additional_suffix,
+        )
+    elif args.type == "sparse_kd":
+        # Sparse Online KD: online teacher forward + sparse KD loss
+        method_suffix = f"{args.kd_method}"
+        if args.kd_method == "topk":
+            method_suffix += f"{args.topk}"
+        else:
+            method_suffix += f"{args.num_samples}"
+        args.save = os.path.join(
+            args.save,
+            base_data_suffix(args),
+            base_model_suffix(args),
+            base_training_hp_suffix(args) + (f"-scr" if args.from_scratch else ""),
+            f"{args.teacher_ckpt_name.replace('/', '_')}-{method_suffix}-kd{args.kd_ratio}" + args.save_additional_suffix,
         )
     elif args.type == "seqkd":
         args.save = os.path.join(

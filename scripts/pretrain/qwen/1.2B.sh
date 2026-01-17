@@ -1,7 +1,11 @@
 #! /bin/bash
+export NCCL_DEBUG=INFO
+export NCCL_IB_DISABLE=1
+export NCCL_SOCKET_IFNAME=^lo
+export MASTER_ADDR=192.168.129.92
 
-BASE_PATH=${1-"/home/MiniPLM"}
-MASTER_PORT=${2-2030}
+BASE_PATH=${1-"/home/jiwonyoon/data1/projects/MiniPLM"}
+MASTER_PORT=${2-2060}
 GPUS_PER_NODE=${3-8}
 NNODES=1
 # HOSTFILE=${5-hostfile_8V100_0_1}
@@ -15,16 +19,16 @@ DISTRIBUTED_ARGS="--num_gpus $GPUS_PER_NODE \
 TYPE="pretrain"
 # model
 CKPT_NAME="qwen/1.2B"
-CKPT="${BASE_PATH}/checkpoints/${CKPT_NAME}/"
+CKPT="/home/jiwonyoon/data1/checkpoints/${CKPT_NAME}"
 # data
-DATA_DIR="${BASE_PATH}/processed_data/pretrain/pile/qwen-1025"
-DATA_NAME="pile"
-WANDB_NAME="1.2B-pretrain"
+DATA_DIR="/home/jiwonyoon/data1/data/pile_dataset"
+DATA_NAME="miniplm_refined_corpus"
+WANDB_NAME="1.2B-pretrain-from-scratch"
 # hp
-BATCH_SIZE=4
+BATCH_SIZE=32
 LR=0.00025
 LR_MIN=0.000025
-GRAD_ACC=16
+GRAD_ACC=2
 # length
 MAX_LENGTH=1024
 # runtime
@@ -51,7 +55,7 @@ OPTS+=" --data-name ${DATA_NAME}"
 OPTS+=" --data-dir ${DATA_DIR}"
 OPTS+=" --num-workers 8"
 OPTS+=" --bin-data"
-OPTS+=" --no-shuffle"
+#OPTS+=" --no-shuffle"
 # hp
 OPTS+=" --lr ${LR}"
 OPTS+=" --lr-min ${LR_MIN}"
@@ -59,7 +63,7 @@ OPTS+=" --batch-size ${BATCH_SIZE}"
 OPTS+=" --gradient-accumulation-steps ${GRAD_ACC}"
 OPTS+=" --warmup-iters 2000"
 OPTS+=" --scheduler-name cosine"
-OPTS+=" --weight-decay 1e-2"
+OPTS+=" --weight-decay 0.1"
 OPTS+=" --clip-grad 1.0"
 OPTS+=" --adam-beta 0.9"
 OPTS+=" --adam-beta2 0.98"

@@ -13,7 +13,7 @@ BASE_PATH=${1-"/data/jykim/MiniPLM"}
 TEACHER_MODEL=${2-"/data/jykim/models/Qwen2.5-7B"}  # Teacher 모델 경로 수정 필요
 
 # GPU 설정 (4대 사용)
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # Data paths
 DATA_DIR="/data/jykim/DB/miniplm_refined_corpus"
@@ -22,7 +22,7 @@ OUTPUT_DIR="/data/jykim/DB/miniplm_refined_corpus_logits_both"
 # Sampling parameters
 TOPK=100              # Top-K의 K
 NUM_SAMPLES=50       # Random Sampling의 N
-BATCH_SIZE=512       # GPU 4대 사용 시 더 키울 수 있음 (메모리 여유에 따라 조정)
+BATCH_SIZE=512       
 MAX_LENGTH=1024
 
 # Processing range (shard 단위로 resume 가능)
@@ -45,6 +45,6 @@ python ${BASE_PATH}/scripts/cache_teacher_logits.py \
     --device auto \
     --dtype bf16
 
-echo "✅ BOTH (Top-K + Sparse) caching completed! Output: ${OUTPUT_DIR}"
+echo " BOTH (Top-K + Sparse) caching completed! Output: ${OUTPUT_DIR}"
 echo "   학습 시 --kd-method로 선택: topk 또는 sparse"
 

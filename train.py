@@ -12,6 +12,7 @@ from utils import print_args, initialize, save_rank
 from pretrain.trainer import PreTrainer
 from vanilla_kd.trainer import VanillaKDPreTrainer
 from offline_kd.trainer import OfflineKDPreTrainer
+from sparse_kd.trainer import SparseKDPreTrainer
 
 
 torch.set_num_threads(16)
@@ -29,6 +30,7 @@ def main():
             json.dump(vars(args), f, indent=4)
     
     device = torch.cuda.current_device()
+
     cur_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     args.time_stamp = cur_time
     save_rank("\n\n" + "="*30 + f" EXP at {cur_time} " + "="*30, os.path.join(args.save, "log.txt"))
@@ -52,11 +54,13 @@ def main():
         trainer = VanillaKDPreTrainer(args, ds_config, device, args.do_train)
     elif args.type == "offline_kd":
         trainer = OfflineKDPreTrainer(args, ds_config, device, args.do_train)
+    elif args.type == "sparse_kd":
+        trainer = SparseKDPreTrainer(args, ds_config, device, args.do_train)
     else:
         raise NotImplementedError(f"Type {args.type} not implemented.")
     
     trainer.train()
 
-    
+
 if __name__ == "__main__":
     main()
