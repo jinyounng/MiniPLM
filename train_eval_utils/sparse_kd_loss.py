@@ -45,29 +45,50 @@ def compute_sparse_kd_loss_efficient(
     token_ids = sparse_teacher_logits['token_ids'].to(device, dtype=torch.long)  # [batch, seq_len, K]
     values = sparse_teacher_logits['values'].to(device, dtype=torch.float32)    # [batch, seq_len, K]
     valid_mask = sparse_teacher_logits['valid_mask'].to(device, dtype=torch.bool)  # [batch]
+    seq_lens = sparse_teacher_logits.get('seq_lens', None)  # [batch] 실제 시퀀스 길이
     
     batch_size, seq_len, K = token_ids.shape
     
-    # Invalid token_ids (-1) 처리
-    valid_token_mask = token_ids >= 0  # [batch, seq_len, K]
-    token_ids_safe = torch.where(valid_token_mask, token_ids, torch.zeros_like(token_ids))
+    # loss_mask와 student_logits의 실제 길이 확인
+    student_seq_len = student_logits.shape[1]
+    loss_mask_seq_len = loss_mask.shape[1] if loss_mask.dim() > 1 else loss_mask.shape[0]
     
-    # Teacher 확률 계산 (sparse 형태 유지)
+    # 시퀀스 길이 불일치 경고
+    if seq_len != student_seq_len or seq_len != loss_mask_seq_len:
+        method_name = sparse_teacher_logits.get('method', 'unknown')
+        warnings.warn(
+            f"⚠️ Sequence length mismatch detected ({method_name} KD): "
+            f"cached_teacher_logits={seq_len}, student_logits={student_seq_len}, "
+            f"loss_mask={loss_mask_seq_len}. Using min={min(seq_len, student_seq_len, loss_mask_seq_len)}. "
+            f"This may indicate a data loading or batch processing issue.",
+            UserWarning
+        )
+    
+    # 길이 맞추기: 최소값 사용
+    actual_seq_len = min(seq_len, student_seq_len, loss_mask_seq_len)
+    
+    # 실제 길이에 맞춰서 데이터 정렬
+    token_ids_aligned = token_ids[:, :actual_seq_len, :]  # [batch, actual_seq_len, K]
+    values_aligned = values[:, :actual_seq_len, :]  # [batch, actual_seq_len, K]
+    valid_token_mask_aligned = token_ids_aligned >= 0  # [batch, actual_seq_len, K]
+    token_ids_safe_aligned = torch.where(valid_token_mask_aligned, token_ids_aligned, torch.zeros_like(token_ids_aligned))
+    
+    # Teacher 확률 계산 (sparse 형태 유지, 실제 길이에 맞춤)
     if sparse_teacher_logits['method'] == 'random':
         # Random Sampling: counts / num_samples -> 이미 unbiased estimator
         # ★ Normalize 하지 않음! (합이 이미 1)
         num_samples = float(sparse_teacher_logits['num_samples'])
-        teacher_probs_normalized = values / num_samples  # [batch, seq_len, K]
-        teacher_probs_normalized = teacher_probs_normalized * valid_token_mask.float()
+        teacher_probs_normalized = values_aligned / num_samples  # [batch, actual_seq_len, K]
+        teacher_probs_normalized = teacher_probs_normalized * valid_token_mask_aligned.float()
         
     else:  # topk
         # Top-K: normalize 필요 (합이 1이 아닐 수 있음, tail 확률 버림)
-        teacher_probs_sparse = values.clone()  # [batch, seq_len, K]
-        teacher_probs_sparse = teacher_probs_sparse * valid_token_mask.float()
+        teacher_probs_sparse = values_aligned.clone()  # [batch, actual_seq_len, K]
+        teacher_probs_sparse = teacher_probs_sparse * valid_token_mask_aligned.float()
         
         # ★ Top-K만 Normalization: 합이 1이 되도록
-        prob_sum = teacher_probs_sparse.sum(dim=-1, keepdim=True).clamp(min=1e-8)  # [batch, seq_len, 1]
-        teacher_probs_normalized = teacher_probs_sparse / prob_sum  # [batch, seq_len, K]
+        prob_sum = teacher_probs_sparse.sum(dim=-1, keepdim=True).clamp(min=1e-8)  # [batch, actual_seq_len, 1]
+        teacher_probs_normalized = teacher_probs_sparse / prob_sum  # [batch, actual_seq_len, K]
     
     # Temperature scaling on teacher (optional)
     if temperature != 1.0:
@@ -92,30 +113,50 @@ def compute_sparse_kd_loss_efficient(
     
     # ★ Student log probabilities: 전체 vocab에 대해 log_softmax 후 sparse token만 gather
     # 중요: log_softmax는 전체 vocab에 대해 계산해야 올바른 확률 분포!
-    # student_logits: [batch, seq_len, vocab_size]
-    student_logprobs_full = F.log_softmax(student_logits / temperature, dim=-1, dtype=torch.float32)  # [batch, seq_len, vocab_size]
+    # student_logits: [batch, seq_len, vocab_size] -> 실제 길이에 맞춤
+    student_logits_aligned = student_logits[:, :actual_seq_len, :]  # [batch, actual_seq_len, vocab_size]
+    
+    student_logprobs_full = F.log_softmax(student_logits_aligned / temperature, dim=-1, dtype=torch.float32)  # [batch, actual_seq_len, vocab_size]
     
     # Sparse token들만 gather (메모리: vocab_size → K)
-    student_logprobs_sparse = torch.gather(student_logprobs_full, dim=-1, index=token_ids_safe)  # [batch, seq_len, K]
+    student_logprobs_sparse = torch.gather(student_logprobs_full, dim=-1, index=token_ids_safe_aligned)  # [batch, actual_seq_len, K]
     
     # student_logprobs_full 메모리 즉시 해제 (vocab_size 차원)
     del student_logprobs_full
     
     # Cross-entropy: -sum(teacher_probs * log(student_probs)) over K dimension
-    # inf/nan 체크
+    # inf/nan 체크 (이미 actual_seq_len에 맞춰짐)
     inf_mask = torch.isinf(student_logprobs_sparse) | torch.isnan(student_logprobs_sparse)
     student_logprobs_sparse = torch.masked_fill(student_logprobs_sparse, inf_mask, 0.0)
     
-    prod = teacher_probs_normalized * student_logprobs_sparse  # [batch, seq_len, K]
+    prod = teacher_probs_normalized * student_logprobs_sparse  # [batch, actual_seq_len, K]
     prod = torch.masked_fill(prod, inf_mask, 0.0)
-    prod = prod * valid_token_mask.float()  # Invalid 위치 제거
+    prod = prod * valid_token_mask_aligned.float()  # Invalid 위치 제거
     
     # Sum over K dimension
     kl_terms = torch.sum(prod, dim=-1)  # [batch, seq_len]
     
+    # 길이 맞추기: 실제 길이만큼만 사용
+    kl_terms = kl_terms[:, :actual_seq_len]  # [batch, actual_seq_len]
+    
+    # loss_mask도 실제 길이에 맞춤
+    if loss_mask.dim() == 2:
+        loss_mask_aligned = loss_mask[:, :actual_seq_len]  # [batch, actual_seq_len]
+    else:
+        # loss_mask가 1D인 경우 (배치 전체에 동일한 마스크)
+        loss_mask_aligned = loss_mask[:actual_seq_len].unsqueeze(0).expand(batch_size, -1)  # [batch, actual_seq_len]
+    
     # Apply loss mask and valid_mask
-    masked_kl = kl_terms * loss_mask * valid_mask.unsqueeze(1).float()  # [batch, seq_len]
-    kd_loss = -torch.sum(masked_kl, dim=-1) / (torch.sum(loss_mask, dim=-1) + 1e-8)  # [batch]
+    valid_mask_expanded = valid_mask.unsqueeze(1).float()  # [batch, 1]
+    masked_kl = kl_terms * loss_mask_aligned * valid_mask_expanded  # [batch, actual_seq_len]
+    
+    # 분모: valid_mask가 True인 경우만 loss_mask 합 계산
+    # valid_mask가 False인 샘플은 분모도 0이 되어 kd_loss = 0
+    denominator = torch.sum(loss_mask_aligned * valid_mask_expanded, dim=-1)  # [batch]
+    kd_loss = -torch.sum(masked_kl, dim=-1) / (denominator + 1e-8)  # [batch]
+    
+    # valid_mask가 False인 샘플은 kd_loss = 0으로 명시적 설정
+    kd_loss = kd_loss * valid_mask.float()  # [batch]
     
     return kd_loss
 
@@ -256,25 +297,46 @@ def compute_sparse_kd_entropy_efficient(
     
     batch_size, seq_len, K = token_ids.shape
     
-    # Invalid token_ids (-1) 처리
-    valid_token_mask = token_ids >= 0  # [batch, seq_len, K]
+    # loss_mask의 실제 길이 확인
+    loss_mask_seq_len = loss_mask.shape[1] if loss_mask.dim() > 1 else loss_mask.shape[0]
     
-    # Teacher 확률 계산 (sparse 형태 유지)
+    # 시퀀스 길이 불일치 경고
+    if seq_len != loss_mask_seq_len:
+        method_name = sparse_teacher_logits.get('method', 'unknown')
+        warnings.warn(
+            f"⚠️ Sequence length mismatch detected in entropy calculation ({method_name} KD): "
+            f"cached_teacher_logits={seq_len}, loss_mask={loss_mask_seq_len}. "
+            f"Using min={min(seq_len, loss_mask_seq_len)}. "
+            f"This may indicate a data loading or batch processing issue.",
+            UserWarning
+        )
+    
+    # 길이 맞추기: 최소값 사용
+    actual_seq_len = min(seq_len, loss_mask_seq_len)
+    
+    # 실제 길이에 맞춰서 데이터 정렬
+    token_ids_aligned = token_ids[:, :actual_seq_len, :]  # [batch, actual_seq_len, K]
+    values_aligned = values[:, :actual_seq_len, :]  # [batch, actual_seq_len, K]
+    
+    # Invalid token_ids (-1) 처리
+    valid_token_mask_aligned = token_ids_aligned >= 0  # [batch, actual_seq_len, K]
+    
+    # Teacher 확률 계산 (sparse 형태 유지, 실제 길이에 맞춤)
     if sparse_teacher_logits['method'] == 'random':
         # Random Sampling: counts / num_samples -> 이미 unbiased estimator
         # ★ Normalize 하지 않음! (합이 이미 1)
         num_samples = float(sparse_teacher_logits['num_samples'])
-        teacher_probs_normalized = values / num_samples
-        teacher_probs_normalized = teacher_probs_normalized * valid_token_mask.float()
+        teacher_probs_normalized = values_aligned / num_samples  # [batch, actual_seq_len, K]
+        teacher_probs_normalized = teacher_probs_normalized * valid_token_mask_aligned.float()
         
     else:  # topk
         # Top-K: normalize 필요 (합이 1이 아닐 수 있음)
-        teacher_probs_sparse = values.clone()
-        teacher_probs_sparse = teacher_probs_sparse * valid_token_mask.float()
+        teacher_probs_sparse = values_aligned.clone()  # [batch, actual_seq_len, K]
+        teacher_probs_sparse = teacher_probs_sparse * valid_token_mask_aligned.float()
         
         # ★ Top-K만 Normalization
-        prob_sum = teacher_probs_sparse.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-        teacher_probs_normalized = teacher_probs_sparse / prob_sum
+        prob_sum = teacher_probs_sparse.sum(dim=-1, keepdim=True).clamp(min=1e-8)  # [batch, actual_seq_len, 1]
+        teacher_probs_normalized = teacher_probs_sparse / prob_sum  # [batch, actual_seq_len, K]
     
     # Temperature scaling
     if temperature != 1.0:
@@ -301,13 +363,20 @@ def compute_sparse_kd_entropy_efficient(
         torch.log(teacher_probs_normalized),
         torch.zeros_like(teacher_probs_normalized)
     )
-    entropy_terms = -teacher_probs_normalized * teacher_logprobs  # [batch, seq_len, K]
-    entropy_terms = entropy_terms * valid_token_mask.float()  # Invalid 위치 제거
-    entropy = torch.sum(entropy_terms, dim=-1)  # [batch, seq_len]
+    entropy_terms = -teacher_probs_normalized * teacher_logprobs  # [batch, actual_seq_len, K]
+    entropy_terms = entropy_terms * valid_token_mask_aligned.float()  # Invalid 위치 제거
+    entropy = torch.sum(entropy_terms, dim=-1)  # [batch, actual_seq_len]
+    
+    # loss_mask도 실제 길이에 맞춤
+    if loss_mask.dim() == 2:
+        loss_mask_aligned = loss_mask[:, :actual_seq_len]  # [batch, actual_seq_len]
+    else:
+        # loss_mask가 1D인 경우 (배치 전체에 동일한 마스크)
+        loss_mask_aligned = loss_mask[:actual_seq_len].unsqueeze(0).expand(batch_size, -1)  # [batch, actual_seq_len]
     
     # Apply loss mask and valid_mask
-    masked_entropy = entropy * loss_mask * valid_mask.unsqueeze(1).float()
-    avg_entropy = torch.sum(masked_entropy, dim=-1) / (torch.sum(loss_mask, dim=-1) + 1e-8)
+    masked_entropy = entropy * loss_mask_aligned * valid_mask.unsqueeze(1).float()  # [batch, actual_seq_len]
+    avg_entropy = torch.sum(masked_entropy, dim=-1) / (torch.sum(loss_mask_aligned, dim=-1) + 1e-8)  # [batch]
     
     return avg_entropy
 

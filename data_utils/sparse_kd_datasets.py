@@ -50,10 +50,10 @@ class SparseKDLMDataset(LMDataset):
         # Cached logits 로드
         self.cached_logits_dir = cached_logits_dir
         self.sparse_logits_loaded = False
-        # LRU cache: 최대 2개 shard만 메모리에 유지
-        # (800 GiB × 2 = 1600 GiB < 2000 GiB RAM)
+        # LRU cache: 최대 1개 shard만 메모리에 유지
+        # (800 GiB × 1 = 800 GiB < 1000 GiB RAM)
         self.sparse_logits_cache = OrderedDict()  # shard_id -> npz data
-        self.max_cache_size = 2
+        self.max_cache_size = 1
         
         if cached_logits_dir is not None:
             self._load_cached_logits_metadata()
@@ -75,7 +75,8 @@ class SparseKDLMDataset(LMDataset):
             self.logits_metadata = json.load(f)
         
         self.logits_method = self.logits_metadata['method']  # 'topk', 'random', or 'both'
-        self.logits_vocab_size = self.logits_metadata['vocab_size']
+        # vocab_size는 optional (sparse KD에서는 필수 아님)
+        self.logits_vocab_size = self.logits_metadata.get('vocab_size', None)
         self.shard_sizes = self.logits_metadata['shard_sizes']
         self.shard_offsets = self.logits_metadata['shard_offsets']
         
@@ -93,7 +94,8 @@ class SparseKDLMDataset(LMDataset):
         print_rank(f"✅ Loaded cached logits metadata:")
         print_rank(f"   Cached method: {self.logits_method}")
         print_rank(f"   Using method: {self.use_method}")
-        print_rank(f"   Vocab size: {self.logits_vocab_size}")
+        if self.logits_vocab_size is not None:
+            print_rank(f"   Vocab size: {self.logits_vocab_size}")
         print_rank(f"   Total shards: {len(self.shard_sizes)}")
         print_rank(f"   Total sequences: {self.logits_metadata['total_sequences']:,}")
         
@@ -305,9 +307,12 @@ class SparseKDLMDataset(LMDataset):
         valid_sparse_logits = [sl for sl in sparse_logits_list if sl is not None]
         
         if len(valid_sparse_logits) > 0:
-            # 배치 내 최대 시퀀스 길이
-            max_seq_len = max(sl['seq_len'] for sl in valid_sparse_logits)
-            max_seq_len = min(max_seq_len, self.max_length)
+            # model_batch의 실제 길이 확인 (텍스트 데이터는 max_length로 패딩됨)
+            # sparse_logits도 이 길이에 맞춰서 패딩/트렁케이션해야 함
+            model_seq_len = model_batch['input_ids'].shape[1] if 'input_ids' in model_batch else self.max_length
+            
+            # model_batch 길이에 맞춤 (sparse_logits가 짧으면 패딩, 길면 자름)
+            max_seq_len = model_seq_len
             
             # 배치 내 최대 K (token_ids의 두 번째 차원)
             max_k = max(sl['token_ids'].shape[1] for sl in valid_sparse_logits)

@@ -147,8 +147,15 @@ class BaseDataset(Dataset):
             
         if no_model_batch is not None:
             for k in no_model_batch:
-                no_model_batch[k] = no_model_batch[k].to(device)    
-        
+                v = no_model_batch[k]
+                # dict인 경우 재귀적으로 처리 (sparse_logits 등)
+                if isinstance(v, dict):
+                    for sub_k in v:
+                        if hasattr(v[sub_k], 'to'):
+                            v[sub_k] = v[sub_k].to(device)
+                elif hasattr(v, 'to'):
+                    no_model_batch[k] = v.to(device)
+            
             return model_batch, no_model_batch
         else:
             return model_batch

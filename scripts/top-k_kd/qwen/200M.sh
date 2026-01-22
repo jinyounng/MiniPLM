@@ -1,39 +1,43 @@
 #! /bin/bash
+# Offline KD with Top-K Sampling - 200M Model
+#
+# Cached teacher logits를 사용한 Knowledge Distillation
+# method: topk - Top-K 토큰의 확률만 사용 (normalized)
 
-BASE_PATH=${1-"/data/jykim/MiniPLM"}
-MASTER_PORT=${2-2030}
-GPUS_PER_NODE=${3-4}
+
+BASE_PATH=${1-"/home/jiwonyoon/data1/projects/MiniPLM"}
+MASTER_PORT=${2-2070}
+GPUS_PER_NODE=${3-8}
 NNODES=1
-# HOSTFILE=${5-hostfile_8V100_0_1}
 
 DISTRIBUTED_ARGS="--num_gpus $GPUS_PER_NODE \
                   --num_nodes $NNODES \
                   --master_port $MASTER_PORT"
-                  #--hostfile $BASE_PATH/configs/hostfiles/$HOSTFILE
 
 # type
 TYPE="offline_kd"
 # model
-CKPT_NAME="qwen/200M_pretrained"
-CKPT="${BASE_PATH}/checkpoints/${CKPT_NAME}/"
-# cached logits (필수!)
-CACHED_LOGITS_DIR="/data/jykim/DB/miniplm_refined_corpus_logits_topk"  # 또는 _sparse
+CKPT_NAME="qwen/200M"
+CKPT="/home/jiwonyoon/data1/checkpoints/${CKPT_NAME}"
+# cached logits (Top-K 사용, HDF5 포맷)
+CACHED_LOGITS_DIR="/home/jiwonyoon/data1/data/logits_hdf5"
+KD_METHOD="topk"  # 'topk' or 'sparse' (method='both'일 때 선택)
 # data
-DATA_DIR="/data/jykim/DB/miniplm_refined_corpus"
-DATA_NAME="dolly"
-WANDB_NAME="200M-offline-kd"
-# hp
-BATCH_SIZE=1
+DATA_DIR="/home/jiwonyoon/data1/data/pile_dataset"
+DATA_NAME="miniplm_refined_corpus"
+WANDB_NAME="200M-offline-kd-topk"
+# hp (vanilla_kd/200M.sh와 동일)
+BATCH_SIZE=32
 LR=0.0006
 LR_MIN=0.00006
-GRAD_ACC=64
+GRAD_ACC=2
 # KD hyperparameters
 ALPHA=0.5              # KD loss 가중치 (0~1, 클수록 KD에 더 가중치)
-KD_TEMPERATURE=1.0     # Temperature scaling
+KD_TEMPERATURE=1.0     # Temperature scaling (sparse KD에서는 1.0 권장)
 # length
 MAX_LENGTH=1024
 # runtime
-SAVE_PATH="${BASE_PATH}/results/${TYPE}"
+SAVE_PATH="${BASE_PATH}/results/${TYPE}/topk"
 # seed
 SEED=10
 
@@ -50,9 +54,9 @@ OPTS+=" --n-gpu ${GPUS_PER_NODE}"
 OPTS+=" --n-nodes ${NNODES}"
 # OPTS+=" --gradient-checkpointing"
 OPTS+=" --from-scratch"
-# OPTS+=" --torch-compile reduce-overhead"
 # offline KD specific
 OPTS+=" --cached-logits-dir ${CACHED_LOGITS_DIR}"
+OPTS+=" --kd-method ${KD_METHOD}"
 OPTS+=" --alpha ${ALPHA}"
 OPTS+=" --kd-temperature ${KD_TEMPERATURE}"
 # data
@@ -68,12 +72,12 @@ OPTS+=" --batch-size ${BATCH_SIZE}"
 OPTS+=" --gradient-accumulation-steps ${GRAD_ACC}"
 OPTS+=" --warmup-iters 2000"
 OPTS+=" --scheduler-name cosine"
-OPTS+=" --weight-decay 1e-2"
+OPTS+=" --weight-decay 0.1"
 OPTS+=" --clip-grad 1.0"
 OPTS+=" --adam-beta 0.9"
 OPTS+=" --adam-beta2 0.98"
 OPTS+=" --adam-eps 1e-6"
-OPTS+=" --total-iters 20000"
+OPTS+=" --total-iters 100000"
 # length
 OPTS+=" --max-length ${MAX_LENGTH}"
 # runtime
@@ -103,4 +107,3 @@ echo ${CMD}
 echo "PYTHONPATH=${PYTHONPATH}"
 mkdir -p ${SAVE_PATH}
 ${CMD}
-

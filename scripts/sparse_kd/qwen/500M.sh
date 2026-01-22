@@ -1,18 +1,12 @@
-#!/bin/bash
-# Sparse Online KD Training - Random Sampling Method (500M)
+#! /bin/bash
+# Offline KD with Sparse Sampling (Random Sampling) - 500M Model
 #
-# Teacher 확률분포에서 N번 랜덤 샘플링하여 KD loss 추정
-# 장점: Unbiased estimator (기대값이 정확)
-# 단점: Top-K보다 약간 느림, variance 있음
+# Cached teacher logits를 사용한 Knowledge Distillation
+# method: sparse (random sampling) - unbiased estimator
 
-export NCCL_DEBUG=INFO
-export NCCL_IB_DISABLE=1
-export NCCL_SOCKET_IFNAME=^lo
-export MASTER_ADDR=192.168.129.92
-export MASTER_PORT=29700
 
 BASE_PATH=${1-"/home/jiwonyoon/data1/projects/MiniPLM"}
-MASTER_PORT=${2-2050}
+MASTER_PORT=${2-2060}
 GPUS_PER_NODE=${3-8}
 NNODES=1
 
@@ -21,34 +15,31 @@ DISTRIBUTED_ARGS="--num_gpus $GPUS_PER_NODE \
                   --master_port $MASTER_PORT"
 
 # type
-TYPE="sparse_kd"
+TYPE="offline_kd"
 # model
 CKPT_NAME="qwen/500M"
 CKPT="/home/jiwonyoon/data1/checkpoints/${CKPT_NAME}"
-TEACHER_CKPT_NAME="7B"
-TEACHER_MODEL_PATH="/home/jiwonyoon/data1/checkpoints/qwen/7B"
+# cached logits (Sparse Sampling 사용, HDF5 포맷)
+CACHED_LOGITS_DIR="/home/jiwonyoon/data1/data/logits_hdf5"
+KD_METHOD="sparse"  # 'topk' or 'sparse' (method='both'일 때 선택)
 # data
 DATA_DIR="/home/jiwonyoon/data1/data/pile_dataset"
 DATA_NAME="miniplm_refined_corpus"
-WANDB_NAME="500M-sparse-kd-random50"
-# hp
-BATCH_SIZE=8
-LR=0.0004
-LR_MIN=0.00004
-GRAD_ACC=8
+WANDB_NAME="500M-offline-kd-sparse"
+# hp (vanilla_kd/500M.sh와 동일)
+BATCH_SIZE=32
+LR=0.0003
+LR_MIN=0.00003
+GRAD_ACC=2
+# KD hyperparameters
+ALPHA=0.5              # KD loss 가중치 (0~1, 클수록 KD에 더 가중치)
+KD_TEMPERATURE=1.0     # Temperature scaling (sparse KD에서는 1.0 권장)
 # length
 MAX_LENGTH=1024
 # runtime
-SAVE_PATH="${BASE_PATH}/results/${TYPE}"
+SAVE_PATH="${BASE_PATH}/results/${TYPE}/sparse_kd"
 # seed
 SEED=10
-
-# ========== Random Sampling Settings ==========
-KD_METHOD="sparse"
-NUM_SAMPLES=50        # 샘플링 횟수 N (50, 100 등)
-KD_RATIO=0.5          # KD loss 가중치 (0~1)
-KD_TEMPERATURE=1.0    # Temperature for softmax
-# ==============================================
 
 
 OPTS=""
@@ -59,12 +50,15 @@ OPTS+=" --model-type qwen"
 OPTS+=" --base-path ${BASE_PATH}"
 OPTS+=" --model-path ${CKPT}"
 OPTS+=" --ckpt-name ${CKPT_NAME}"
-OPTS+=" --teacher-model-type qwen"
-OPTS+=" --teacher-model-path ${TEACHER_MODEL_PATH}"
-OPTS+=" --teacher-ckpt-name ${TEACHER_CKPT_NAME}"
 OPTS+=" --n-gpu ${GPUS_PER_NODE}"
 OPTS+=" --n-nodes ${NNODES}"
+# OPTS+=" --gradient-checkpointing"
 OPTS+=" --from-scratch"
+# offline KD specific
+OPTS+=" --cached-logits-dir ${CACHED_LOGITS_DIR}"
+OPTS+=" --kd-method ${KD_METHOD}"
+OPTS+=" --alpha ${ALPHA}"
+OPTS+=" --kd-temperature ${KD_TEMPERATURE}"
 # data
 OPTS+=" --data-name ${DATA_NAME}"
 OPTS+=" --data-dir ${DATA_DIR}"
@@ -83,14 +77,9 @@ OPTS+=" --clip-grad 1.0"
 OPTS+=" --adam-beta 0.9"
 OPTS+=" --adam-beta2 0.98"
 OPTS+=" --adam-eps 1e-6"
-OPTS+=" --total-iters 18000"
+OPTS+=" --total-iters 100000"
 # length
 OPTS+=" --max-length ${MAX_LENGTH}"
-# sparse kd - Random Sampling
-OPTS+=" --kd-method ${KD_METHOD}"
-OPTS+=" --num-samples ${NUM_SAMPLES}"
-OPTS+=" --kd-ratio ${KD_RATIO}"
-OPTS+=" --kd-temperature ${KD_TEMPERATURE}"
 # runtime
 OPTS+=" --do-train"
 OPTS+=" --save-interval 1000"
@@ -104,7 +93,7 @@ OPTS+=" --seed ${SEED}"
 OPTS+=" --deepspeed"
 OPTS+=" --deepspeed_config ${BASE_PATH}/configs/deepspeed/ds_config.json"
 # wandb
-OPTS+=" --wandb-group sparse_kd"
+OPTS+=" --wandb-group offline_kd"
 OPTS+=" --wandb-name ${WANDB_NAME}"
 
 
@@ -114,14 +103,7 @@ export PYTHONPATH=${BASE_PATH}
 export OMP_NUM_THREADS=16
 CMD="deepspeed ${DISTRIBUTED_ARGS} ${BASE_PATH}/train.py ${OPTS} $@"
 
-echo "=========================================="
-echo "Sparse KD Training - Random Sampling (500M)"
-echo "  Num Samples: ${NUM_SAMPLES}"
-echo "  KD Ratio: ${KD_RATIO}"
-echo "  Temperature: ${KD_TEMPERATURE}"
-echo "=========================================="
 echo ${CMD}
 echo "PYTHONPATH=${PYTHONPATH}"
 mkdir -p ${SAVE_PATH}
 ${CMD}
-

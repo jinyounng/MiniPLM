@@ -35,8 +35,8 @@ BATCH_SIZE=52       # GPU당 배치 사이즈 (데이터 분산 처리로 메모
 MAX_LENGTH=1024
 
 # Processing range
-START_SHARD=45
-END_SHARD=-1
+START_SHARD=39
+END_SHARD=40
 
 export PYTHONPATH=${BASE_PATH}
 
@@ -63,4 +63,3 @@ echo ""
 echo "✅ BOTH (Top-K + Sparse) caching completed!"
 echo "   Output: ${OUTPUT_DIR}"
 echo "   학습 시 --kd-method로 선택: topk 또는 sparse"
-

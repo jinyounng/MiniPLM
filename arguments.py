@@ -331,9 +331,9 @@ def get_args():
                 logits_method = "sparse"
             elif "topk" in args.cached_logits_dir:
                 logits_method = "topk"
+        # offline_kd는 data_name을 경로에서 제외
         args.save = os.path.join(
             args.save,
-            base_data_suffix(args),
             base_model_suffix(args),
             base_training_hp_suffix(args) + (f"-scr" if args.from_scratch else ""),
             f"offline-{logits_method}-a{args.alpha}" + args.save_additional_suffix,

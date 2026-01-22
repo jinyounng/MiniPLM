@@ -21,8 +21,9 @@ TEACHER_MODEL=${2-"/home/jiwonyoon/data1/checkpoints/qwen/7B"}
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 NUM_GPUS=8
 
-# Triton 캐시 디렉토리 (NFS 회피)
-export TRITON_CACHE_DIR="/home/jiwonyoon/data1/.triton_cache"
+# Triton 캐시 디렉토리 (/tmp 사용 - 권한 문제 회피)
+export TRITON_CACHE_DIR="/tmp/triton_cache_jiwonyoon"
+mkdir -p ${TRITON_CACHE_DIR}
 
 # Data paths
 DATA_DIR="/home/jiwonyoon/data1/data/pile_dataset"
@@ -31,12 +32,12 @@ OUTPUT_DIR="/home/jiwonyoon/data1/data/miniplm_refined_corpus_logits_both"
 # Sampling parameters
 TOPK=100              # Top-K의 K
 NUM_SAMPLES=50        # Random Sampling의 N
-BATCH_SIZE=64       # GPU당 배치 사이즈 (데이터 분산 처리로 메모리 여유 있음)
+BATCH_SIZE=52       # GPU당 배치 사이즈 (데이터 분산 처리로 메모리 여유 있음)
 MAX_LENGTH=1024
 
 # Processing range
-START_SHARD=27
-END_SHARD=53  # 32~52 shard 처리 (21개)
+START_SHARD=45
+END_SHARD=46
 
 export PYTHONPATH=${BASE_PATH}
 
