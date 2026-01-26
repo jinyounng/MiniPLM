@@ -37,7 +37,7 @@ DISTRIBUTED_ARGS=(
 
 TYPE="eval_harness"
 DATA_NAME="end_tasks"
-EVAL_DATA_NAMES="hellaswag"
+EVAL_DATA_NAMES="winogrande"
 EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-64}
 SEED=${SEED:-10}
 
