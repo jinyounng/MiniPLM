@@ -30,12 +30,16 @@ class ConditionalAutoEncoder(nn.Module):
         self.latent_dim = latent_dim
         
         # Y condition embedding: use teacher's word embedding (frozen)
-        # nn.Embedding을 복사하지 않고 참조만 하거나, 가중치만 가져옵니다.
-        # DDP 환경에서는 파라미터 등록을 피하기 위해 buffer로 등록하거나 forward에서 처리
-        self.y_embed = teacher_embed 
-        # 주의: teacher_embed는 외부 모델의 모듈이므로 여기서 grad 설정을 다시 할 필요는 없으나 안전장치
-        for p in self.y_embed.parameters():
-            p.requires_grad = False
+        # DDP 환경에서 parameter 충돌을 피하기 위해 weight만 복사해서 buffer로 등록
+        if teacher_embed is not None:
+            # teacher_embed의 weight만 복사해서 buffer로 등록 (gradient 없음)
+            self.register_buffer('y_embed_weight', teacher_embed.weight.data.clone())
+            self.y_embed_num_embeddings = teacher_embed.num_embeddings
+            self.y_embed_embedding_dim = teacher_embed.embedding_dim
+        else:
+            self.y_embed_weight = None
+            self.y_embed_num_embeddings = None
+            self.y_embed_embedding_dim = None
         
         # Encoder input: hidden + teacher_embed(y)
         enc_input_dim = input_dim * 2 
@@ -71,6 +75,11 @@ class ConditionalAutoEncoder(nn.Module):
         decoder_layers.append(nn.LayerNorm(input_dim))
         self.decoder = nn.Sequential(*decoder_layers)
     
+    def _embed_y(self, y_token):
+        """Separate method for y embedding (DDP-safe)"""
+        # F.embedding 사용 (buffer는 parameter가 아니므로 DDP 문제 없음)
+        return F.embedding(y_token, self.y_embed_weight)
+    
     def _get_dims(self, input_dim, latent_dim):
         if latent_dim >= input_dim:
             return [input_dim, latent_dim]
@@ -83,10 +92,13 @@ class ConditionalAutoEncoder(nn.Module):
         return dims
     
     def forward(self, hidden, y_token):
-        # Teacher Embed는 이미 GPU에 올라가 있다고 가정 (Accelerator가 관리하거나 Teacher가 같은 GPU에 있음)
-        cond = self.y_embed(y_token).to(hidden.dtype)
+        # Use buffer-based embedding (DDP-safe)
+        cond = self._embed_y(y_token).float()
         
-        enc_input = torch.cat([hidden, cond], dim=-1)
+        # Ensure hidden is also float32 for consistency
+        hidden_f32 = hidden.float()
+        
+        enc_input = torch.cat([hidden_f32, cond], dim=-1)
         z = self.encoder(enc_input)
         
         dec_input = torch.cat([z, cond], dim=-1)
@@ -98,8 +110,14 @@ class ConditionalAutoEncoder(nn.Module):
 # Helper Functions
 # ========================================================================================
 
-def get_lm_logits_from_hidden(model, hidden_states):
-    """Get logits from hidden states"""
+def get_lm_logits_from_hidden(model, hidden_states, force_float32=False):
+    """Get logits from hidden states
+    
+    Args:
+        model: Teacher model
+        hidden_states: Input hidden states
+        force_float32: If True, use float32 for computation (for gradient flow compatibility)
+    """
     # DDP unwrap (if needed, but usually model.module handles it or access directly)
     if hasattr(model, "module"):
         actual_model = model.module
@@ -108,16 +126,38 @@ def get_lm_logits_from_hidden(model, hidden_states):
     
     if hasattr(actual_model, "transformer") and hasattr(actual_model.transformer, "ln_f"):
         ln_f = actual_model.transformer.ln_f
-        target_dtype = ln_f.weight.dtype
-        hidden_states = hidden_states.to(target_dtype)
-        hidden_norm = ln_f(hidden_states)
+        if force_float32:
+            # Use float32 for computation
+            # CRITICAL: Detach teacher weights to prevent gradient flow through frozen teacher model
+            hidden_states_f32 = hidden_states.float()
+            with torch.no_grad():
+                ln_f_weight_f32 = ln_f.weight.float().detach()
+                ln_f_bias_f32 = ln_f.bias.float().detach() if ln_f.bias is not None else None
+            hidden_norm = F.layer_norm(
+                hidden_states_f32, 
+                (hidden_states_f32.size(-1),),
+                weight=ln_f_weight_f32,
+                bias=ln_f_bias_f32,
+                eps=ln_f.eps
+            )
+        else:
+            target_dtype = ln_f.weight.dtype
+            hidden_states = hidden_states.to(target_dtype)
+            hidden_norm = ln_f(hidden_states)
     else:
-        hidden_norm = hidden_states
+        hidden_norm = hidden_states.float() if force_float32 else hidden_states
     
     lm_head = actual_model.lm_head
-    head_dtype = lm_head.weight.dtype
-    hidden_norm = hidden_norm.to(head_dtype)
-    logits = lm_head(hidden_norm)
+    if force_float32:
+        # Use float32 for computation
+        # CRITICAL: Detach teacher weights to prevent gradient flow through frozen teacher model
+        with torch.no_grad():
+            lm_head_weight_f32 = lm_head.weight.float().detach()
+        logits = F.linear(hidden_norm, lm_head_weight_f32, bias=None)
+    else:
+        head_dtype = lm_head.weight.dtype
+        hidden_norm = hidden_norm.to(head_dtype)
+        logits = lm_head(hidden_norm)
     return logits
 
 # ========================================================================================
@@ -156,7 +196,7 @@ class TeacherPredictionDatasetOptimized(Dataset):
         # 인덱스만 반환
         return self.valid_indices[idx]
 
-def collate_fn_optimized(batch_indices, dataset, teacher_model, tokenizer, device, max_length):
+def collate_fn_optimized(batch_indices, dataset, teacher_model, tokenizer, device, max_length, accelerator=None):
     """
     1. 시퀀스 배치 로드
     2. Teacher Inference (Sequence Level)
@@ -201,15 +241,24 @@ def collate_fn_optimized(batch_indices, dataset, teacher_model, tokenizer, devic
     
     # 2. Teacher Inference
     # Teacher is already on the correct device (managed by Accelerator or manually set)
+    # Ensure teacher model is in eval mode
+    teacher_model.eval()
+    
+    # NOTE: Do NOT use accelerator.wait_for_everyone() in collate_fn
+    # collate_fn runs in DataLoader context and may cause NCCL timeout
+    # Each rank processes its batch independently
+    
     with torch.no_grad():
-        outputs = teacher_model(
-            input_ids=input_tensor,
-            attention_mask=mask_tensor,
-            output_hidden_states=True,
-            use_cache=False
-        )
-        last_hidden = outputs.hidden_states[-1] # [B, L, H]
-        teacher_logits = outputs.logits  # [B, L, vocab_size]
+        # Use torch.inference_mode() for better performance and safety
+        with torch.inference_mode():
+            outputs = teacher_model(
+                input_ids=input_tensor,
+                attention_mask=mask_tensor,
+                output_hidden_states=True,
+                use_cache=False
+            )
+            last_hidden = outputs.hidden_states[-1] # [B, L, H]
+            teacher_logits = outputs.logits  # [B, L, vocab_size]
     
     # 3. Extract y tokens (teacher's argmax prediction) and flatten valid tokens
     bool_mask = mask_tensor.bool()
@@ -241,41 +290,50 @@ def evaluate_model(
     
     is_main_process = accelerator.is_main_process if accelerator is not None else True
     
+    # Ensure all processes participate in evaluation
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    
     with torch.no_grad():
         pbar = tqdm(val_loader, desc="Evaluating", disable=not is_main_process, leave=False)
         for batch in pbar:
             if batch is None: continue
             
-            h = batch['hidden'] # Already on device
+            h = batch['hidden'] # Already on device (may be bfloat16 from teacher)
             y_token = batch['y_token']
             
-            recon, z = ae_model(h, y_token=y_token)
+            # Convert to float32 immediately
+            h_f32 = h.float()
             
-            # MSE loss
-            mse_loss = F.mse_loss(recon, h)
+            recon, z = ae_model(h_f32, y_token=y_token)
+            # recon is already float32 from AE model forward
+            
+            # MSE loss - all in float32
+            mse_loss = F.mse_loss(recon, h_f32)
             
             # Cosine similarity loss
-            cosine_sim = F.cosine_similarity(recon, h, dim=-1)
+            cosine_sim = F.cosine_similarity(recon, h_f32, dim=-1)
             cosine_loss = (1 - cosine_sim).mean()
             
             # Logit Loss Calculation
-            # Cast to teacher dtype
-            teacher_dtype = teacher_model.dtype if hasattr(teacher_model, 'dtype') else next(teacher_model.parameters()).dtype
+            # Use float32 for both to avoid dtype mismatch
+            h_for_logits_f32 = h_f32
+            recon_for_logits_f32 = recon
             
-            h_for_logits = h.to(teacher_dtype)
-            recon_for_logits = recon.to(teacher_dtype)
+            # No synchronization needed here - each rank processes its own batch independently
+            with torch.no_grad():
+                teacher_logits_f32 = get_lm_logits_from_hidden(teacher_model, h_for_logits_f32, force_float32=True).detach()
             
-            teacher_logits = get_lm_logits_from_hidden(teacher_model, h_for_logits)
-            recon_logits = get_lm_logits_from_hidden(teacher_model, recon_for_logits)
+            recon_logits_f32 = get_lm_logits_from_hidden(teacher_model, recon_for_logits_f32, force_float32=True)
             
             temperature = 1.0
             logit_loss = F.kl_div(
-                F.log_softmax(recon_logits / temperature, dim=-1),
-                F.softmax(teacher_logits / temperature, dim=-1),
+                F.log_softmax(recon_logits_f32 / temperature, dim=-1),
+                F.softmax(teacher_logits_f32 / temperature, dim=-1),
                 reduction="batchmean",
             ) * (temperature ** 2)
             
-            logit_mse_loss = F.mse_loss(recon_logits, teacher_logits)
+            logit_mse_loss = F.mse_loss(recon_logits_f32, teacher_logits_f32)
             
             loss = (alpha_mse * mse_loss + alpha_cosine * cosine_loss +
                     alpha_logit * logit_loss + alpha_logit_mse * logit_mse_loss)
@@ -288,6 +346,21 @@ def evaluate_model(
                 
                 # Update tqdm with current loss
                 pbar.set_postfix({'loss': loss.item(), 'avg_loss': val_loss / total_samples if total_samples > 0 else 0.0})
+    
+    # Distributed reduction for accurate average across all processes
+    if accelerator is not None and accelerator.num_processes > 1:
+        # Use accelerator.gather() for safer distributed reduction
+        total_samples_tensor = torch.tensor([total_samples], device=accelerator.device, dtype=torch.float32)
+        val_loss_tensor = torch.tensor([val_loss], device=accelerator.device, dtype=torch.float32)
+        
+        # Gather from all processes and sum
+        gathered_samples = accelerator.gather(total_samples_tensor)
+        gathered_loss = accelerator.gather(val_loss_tensor)
+        
+        total_samples = int(gathered_samples.sum().item())
+        val_loss = gathered_loss.sum().item()
+        
+        accelerator.wait_for_everyone()
     
     avg_val_loss = val_loss / total_samples if total_samples > 0 else float('inf')
     return avg_val_loss
@@ -315,17 +388,18 @@ def train_autoencoder_distributed(
     # Collate function wrappers
     def train_collate_wrapper(batch):
         return collate_fn_optimized(
-            batch, train_dataset, teacher_model, tokenizer, accelerator.device, args.max_length
+            batch, train_dataset, teacher_model, tokenizer, accelerator.device, args.max_length, accelerator=accelerator
         )
     
     def val_collate_wrapper(batch):
         return collate_fn_optimized(
-            batch, val_dataset, teacher_model, tokenizer, accelerator.device, args.max_length
+            batch, val_dataset, teacher_model, tokenizer, accelerator.device, args.max_length, accelerator=accelerator
         )
 
     # DataLoaders
     # Note: num_workers=0 because collate_fn uses CUDA (teacher forward pass)
     # CUDA cannot be used in forked subprocess, so we disable multiprocessing
+    # Accelerator.prepare() will handle distributed sampling automatically
     train_loader = DataLoader(
         train_dataset, batch_size=args.batch_size, 
         shuffle=True, num_workers=0, collate_fn=train_collate_wrapper, pin_memory=False
@@ -359,23 +433,31 @@ def train_autoencoder_distributed(
     
     best_val_loss = float('inf')
     epochs_no_improve = 0
+    # Initialize tensor for broadcasting epochs_no_improve across processes
+    epochs_no_improve_tensor = torch.tensor([0], device=accelerator.device, dtype=torch.int)
     current_step = 0
     
     if accelerator.is_main_process:
         print(f"Start Training on {accelerator.num_processes} GPUs")
         print(f"Total steps: {total_steps}, Eval interval: {eval_interval}")
     
-    # Initial evaluation (before training)
-    if val_loader is not None and accelerator.is_main_process:
-        print("\n" + "="*100)
-        print("Initial Evaluation (Before Training)")
-        print("="*100)
+    # Initial evaluation (before training) - ALL processes must participate
+    if val_loader is not None:
+        if accelerator.is_main_process:
+            print("\n" + "="*100)
+            print("Initial Evaluation (Before Training)")
+            print("="*100)
+        
+        # All processes participate in evaluation
         initial_val_loss = evaluate_model(
             ae_model, teacher_model, val_loader,
             args.alpha_mse, args.alpha_cosine, args.alpha_logit, args.alpha_logit_mse,
             accelerator=accelerator
         )
-        print(f"Initial Val Loss: {initial_val_loss:.6f}")
+        
+        if accelerator.is_main_process:
+            print(f"Initial Val Loss: {initial_val_loss:.6f}")
+        
         best_val_loss = initial_val_loss
         accelerator.wait_for_everyone()
     
@@ -389,49 +471,64 @@ def train_autoencoder_distributed(
         train_loss = 0.0
         train_samples = 0
         
+        if accelerator.is_main_process:
+            print(f"\nEpoch {epoch+1}/{args.epochs}")
+            print("Processing first batch (teacher inference may take a moment)...")
+        
         # Train Loop
         with tqdm(train_loader, disable=not accelerator.is_main_process, desc=f"Epoch {epoch+1}") as pbar:
-            for batch in pbar:
+            for batch_idx, batch in enumerate(pbar):
                 if batch is None: continue
                 
-                h = batch['hidden'] # Already on device
+                h = batch['hidden'] # Already on device (may be bfloat16 from teacher)
                 y_token = batch['y_token']
                 
-                optimizer.zero_grad()
+                # Convert to float32 immediately to avoid dtype issues
+                h_f32 = h.float()
                 
-                recon, z = ae_model(h, y_token=y_token)
+                recon, z = ae_model(h_f32, y_token=y_token)
+                # recon is already float32 from AE model forward
                 
-                # Losses
-                mse_loss = F.mse_loss(recon, h)
-                cosine_sim = F.cosine_similarity(recon, h, dim=-1)
+                # Losses - all in float32
+                mse_loss = F.mse_loss(recon, h_f32)
+                cosine_sim = F.cosine_similarity(recon, h_f32, dim=-1)
                 cosine_loss = (1 - cosine_sim).mean()
                 
                 # Logit Loss
-                teacher_dtype = teacher_model.dtype if hasattr(teacher_model, 'dtype') else torch.bfloat16
-                h_for_logits = h.to(teacher_dtype)
-                recon_for_logits = recon.to(teacher_dtype)
+                # Use float32 for both to avoid dtype mismatch in backward pass
+                h_for_logits_f32 = h_f32
+                recon_for_logits_f32 = recon
                 
                 with torch.no_grad():
-                    teacher_logits = get_lm_logits_from_hidden(teacher_model, h_for_logits)
-                recon_logits = get_lm_logits_from_hidden(teacher_model, recon_for_logits)
+                    # Teacher logits: use float32 computation and detach
+                    teacher_logits_f32 = get_lm_logits_from_hidden(teacher_model, h_for_logits_f32, force_float32=True).detach()
+                
+                # Recon logits: need gradient, use float32 computation
+                recon_logits_f32 = get_lm_logits_from_hidden(teacher_model, recon_for_logits_f32, force_float32=True)
                 
                 temperature = 1.0
                 logit_loss = F.kl_div(
-                    F.log_softmax(recon_logits / temperature, dim=-1),
-                    F.softmax(teacher_logits / temperature, dim=-1),
+                    F.log_softmax(recon_logits_f32 / temperature, dim=-1),
+                    F.softmax(teacher_logits_f32 / temperature, dim=-1),
                     reduction="batchmean",
                 ) * (temperature ** 2)
                 
-                logit_mse_loss = F.mse_loss(recon_logits, teacher_logits)
+                logit_mse_loss = F.mse_loss(recon_logits_f32, teacher_logits_f32)
                 
                 loss = (args.alpha_mse * mse_loss + args.alpha_cosine * cosine_loss + 
                         args.alpha_logit * logit_loss + args.alpha_logit_mse * logit_mse_loss)
                 
-                # Backward via Accelerator
+                # Backward via Accelerator (handles distributed synchronization automatically)
                 accelerator.backward(loss)
                 
-                torch.nn.utils.clip_grad_norm_(ae_model.parameters(), 1.0)
+                # Gradient clipping - use accelerator's method for distributed training
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(ae_model.parameters(), 1.0)
+                else:
+                    torch.nn.utils.clip_grad_norm_(ae_model.parameters(), 1.0)
+                
                 optimizer.step()
+                optimizer.zero_grad()
                 
                 batch_size = h.size(0)
                 train_loss += loss.item() * batch_size
@@ -469,12 +566,23 @@ def train_autoencoder_distributed(
                             os.makedirs(args.output_dir, exist_ok=True)
                             save_path = os.path.join(args.output_dir, f"best_ae_ld{args.latent_dim}.pt")
                             
-                            # y_embed 제외하고 저장
-                            state_dict = {k: v for k, v in unwrapped_model.state_dict().items() if 'y_embed' not in k}
-                            torch.save(state_dict, save_path)
+                            # y_embed_weight는 buffer이므로 저장됨 (필요시 제외 가능)
+                            torch.save(unwrapped_model.state_dict(), save_path)
                             print(f"Saved best model to {save_path}")
                         else:
                             epochs_no_improve += 1
+                        
+                        # Update tensor for broadcasting
+                        epochs_no_improve_tensor[0] = epochs_no_improve
+                    
+                    # Broadcast epochs_no_improve to all processes
+                    if accelerator.num_processes > 1:
+                        epochs_no_improve_tensor = accelerator.broadcast(epochs_no_improve_tensor, from_process=0)
+                        epochs_no_improve = epochs_no_improve_tensor.item()
+                    
+                    # Check early stopping (synchronized across all processes)
+                    if epochs_no_improve >= args.patience:
+                        break
                     
                     ae_model.train() # Return to train mode
 
@@ -482,10 +590,12 @@ def train_autoencoder_distributed(
         if accelerator.is_main_process:
             avg_train_loss = train_loss / train_samples if train_samples > 0 else float('inf')
             print(f"Epoch {epoch+1} finished. Avg Train Loss: {avg_train_loss:.6f}")
-            
-            if epochs_no_improve >= args.patience:
+        
+        # Check early stopping (synchronized across all processes)
+        if epochs_no_improve >= args.patience:
+            if accelerator.is_main_process:
                 print("Early stopping triggered.")
-                break
+            break
 
 # ========================================================================================
 # Main
@@ -515,10 +625,19 @@ def main():
     
     # 1. Initialize Accelerator
     accelerator = Accelerator()
-    set_seed(42)
+    
+    # Set seed AFTER accelerator initialization to ensure proper distributed seeding
+    # Each process gets a different seed based on its rank
+    seed = 42 + accelerator.process_index
+    set_seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     
     if accelerator.is_main_process:
         print(f"Running on {accelerator.num_processes} GPUs with Accelerate.")
+        print(f"Main process seed: {seed}")
     
     # 2. Load Teacher (Frozen)
     if accelerator.is_main_process:
@@ -538,6 +657,11 @@ def main():
     
     # Move teacher to device (Accelerate handles the rest via prepare, but teacher is kept separate)
     teacher_model.to(accelerator.device)
+    
+    # Ensure teacher model is in eval mode and synchronized across processes
+    teacher_model.eval()
+    # Synchronize all processes before proceeding
+    accelerator.wait_for_everyone()
     
     # 3. Model Config Extraction
     if hasattr(teacher_model.config, 'n_embd'):

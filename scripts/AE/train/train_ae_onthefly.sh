@@ -30,7 +30,7 @@ OUTPUT_DIR="${BASE_PATH}/checkpoints/AE/logit_only/layernorm"
 LATENT_DIM=${3-25}              # Latent dimension (default: 25)
 # TRAIN_SAMPLES는 전달하지 않아서 data_0의 모든 데이터 사용
 VAL_SAMPLES=${4-1000}           # Number of validation sequences (default: 1000)
-BATCH_SIZE=${5-32}              # Batch size per GPU (default: 32, total = 32 * 8 = 256)
+BATCH_SIZE=${5-16}              # Batch size per GPU (default: 32, total = 32 * 8 = 256)
 EPOCHS=${6-1}                   # Number of epochs (default: 1)
 LR=${7-5e-4}                    # Learning rate (default: 5e-4)
 PATIENCE=${8-10}                 # Early stopping patience (default: 10)
