@@ -11,6 +11,7 @@ import sys
 import numpy as np
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+import math
 
 # Add parent directory to path for data_utils
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -20,20 +21,23 @@ except ImportError:
     print("Warning: data_utils not found. Ensure the path is correct.")
 
 # ========================================================================================
-# AutoEncoder Model
+# AutoEncoder Model with Cross-Attention Decoder
 # ========================================================================================
 
-class ConditionalAutoEncoder(nn.Module):
-    """AutoEncoder with Y condition (using teacher embedding)"""
-    def __init__(self, input_dim=1600, latent_dim=8, teacher_embed=None):
+class ConditionalAutoEncoderCrossAttn(nn.Module):
+    """AutoEncoder with Y condition and Cross-Attention Decoder
+    Decoder uses Z as query to attend over Y_emb (key/value)
+    """
+    def __init__(self, input_dim=1600, latent_dim=8, teacher_embed=None, num_heads=8):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
+        self.num_heads = num_heads
+        self.head_dim = input_dim // num_heads
+        assert input_dim % num_heads == 0, f"input_dim ({input_dim}) must be divisible by num_heads ({num_heads})"
         
         # Y condition embedding: use teacher's word embedding (frozen)
-        # DDP 환경에서 parameter 충돌을 피하기 위해 weight만 복사해서 buffer로 등록
         if teacher_embed is not None:
-            # teacher_embed의 weight만 복사해서 buffer로 등록 (gradient 없음)
             self.register_buffer('y_embed_weight', teacher_embed.weight.data.clone())
             self.y_embed_num_embeddings = teacher_embed.num_embeddings
             self.y_embed_embedding_dim = teacher_embed.embedding_dim
@@ -57,28 +61,22 @@ class ConditionalAutoEncoder(nn.Module):
         
         encoder_layers = []
         for i in range(len(enc_dims) - 1):
-            encoder_layers.append(nn.Linear(enc_dims[i], enc_dims[i+1]))
+            encoder_layers.append(nn.Linear(enc_dims[i], enc_dims[i + 1]))
             if i < len(enc_dims) - 2:
-                encoder_layers.append(nn.LayerNorm(enc_dims[i+1]))
+                encoder_layers.append(nn.LayerNorm(enc_dims[i + 1]))
                 encoder_layers.append(nn.GELU())
         self.encoder = nn.Sequential(*encoder_layers)
         
-        # Decoder Structure Construction
-        dec_input_dim = latent_dim + input_dim
-        decoder_dims = self._get_dims(dec_input_dim, input_dim)
+        # Decoder: Cross-Attention based
+        # Z (latent) → Query, Y_emb → Key/Value
+        self.q_proj = nn.Linear(latent_dim, input_dim)  # Z → Query
+        self.k_proj = nn.Linear(input_dim, input_dim)   # Y_emb → Key
+        self.v_proj = nn.Linear(input_dim, input_dim)   # Y_emb → Value
+        self.out_proj = nn.Linear(input_dim, input_dim)  # Output projection
+        self.layer_norm = nn.LayerNorm(input_dim)
         
-        decoder_layers = []
-        for i in range(len(decoder_dims) - 1):
-            decoder_layers.append(nn.Linear(decoder_dims[i], decoder_dims[i+1]))
-            if i < len(decoder_dims) - 2:
-                decoder_layers.append(nn.LayerNorm(decoder_dims[i+1]))
-                decoder_layers.append(nn.GELU())
-        decoder_layers.append(nn.LayerNorm(input_dim))
-        self.decoder = nn.Sequential(*decoder_layers)
-    
     def _embed_y(self, y_token):
         """Separate method for y embedding (DDP-safe)"""
-        # F.embedding 사용 (buffer는 parameter가 아니므로 DDP 문제 없음)
         return F.embedding(y_token, self.y_embed_weight)
     
     def _get_dims(self, input_dim, latent_dim):
@@ -92,6 +90,50 @@ class ConditionalAutoEncoder(nn.Module):
         dims.append(latent_dim)
         return dims
     
+    def _cross_attention(self, z, y_emb):
+        """
+        Cross-Attention: Z attends to Y_emb
+        Args:
+            z: [B, latent_dim] - Query source
+            y_emb: [B, input_dim] - Key/Value source
+        Returns:
+            out: [B, input_dim] - Attended output
+        """
+        B = z.size(0)
+        
+        # Project to Q, K, V
+        # For cross-attention, we need to handle single-vector case
+        # Expand Z to have sequence dimension for multi-head attention
+        z_expanded = z.unsqueeze(1)  # [B, 1, latent_dim]
+        y_emb_expanded = y_emb.unsqueeze(1)  # [B, 1, input_dim]
+        
+        Q = self.q_proj(z_expanded)  # [B, 1, input_dim]
+        K = self.k_proj(y_emb_expanded)  # [B, 1, input_dim]
+        V = self.v_proj(y_emb_expanded)  # [B, 1, input_dim]
+        
+        # Reshape for multi-head attention
+        Q = Q.view(B, 1, self.num_heads, self.head_dim).transpose(1, 2)  # [B, num_heads, 1, head_dim]
+        K = K.view(B, 1, self.num_heads, self.head_dim).transpose(1, 2)  # [B, num_heads, 1, head_dim]
+        V = V.view(B, 1, self.num_heads, self.head_dim).transpose(1, 2)  # [B, num_heads, 1, head_dim]
+        
+        # Scaled dot-product attention
+        # Since we have single query and single key/value, attention is just a weighted combination
+        # But we can still use the attention mechanism for flexibility
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)  # [B, num_heads, 1, 1]
+        attn_weights = F.softmax(scores, dim=-1)  # [B, num_heads, 1, 1]
+        attn_output = torch.matmul(attn_weights, V)  # [B, num_heads, 1, head_dim]
+        
+        # Concatenate heads
+        attn_output = attn_output.transpose(1, 2).contiguous()  # [B, 1, num_heads, head_dim]
+        attn_output = attn_output.view(B, 1, self.input_dim)  # [B, 1, input_dim]
+        attn_output = attn_output.squeeze(1)  # [B, input_dim]
+        
+        # Output projection
+        out = self.out_proj(attn_output)  # [B, input_dim]
+        out = self.layer_norm(out)
+        
+        return out
+    
     def forward(self, hidden, y_token):
         # Use buffer-based embedding (DDP-safe)
         cond = self._embed_y(y_token).float()
@@ -99,11 +141,12 @@ class ConditionalAutoEncoder(nn.Module):
         # Ensure hidden is also float32 for consistency
         hidden_f32 = hidden.float()
         
+        # Encoder: [hidden + Y_emb] → Z
         enc_input = torch.cat([hidden_f32, cond], dim=-1)
-        z = self.encoder(enc_input)
+        z = self.encoder(enc_input)  # [B, latent_dim]
         
-        dec_input = torch.cat([z, cond], dim=-1)
-        recon = self.decoder(dec_input)
+        # Decoder: Cross-Attention (Z attends to Y_emb)
+        recon = self._cross_attention(z, cond)  # [B, input_dim]
         
         return recon, z
 
@@ -426,6 +469,7 @@ def train_autoencoder_distributed(
     if accelerator.is_main_process:
         print(f"Start Training on {accelerator.num_processes} GPUs")
         print("Evaluation will be performed at the end of each epoch to prevent DDP desynchronization.")
+        print(f"Decoder: Cross-Attention (Z → Y_emb)")
     
     # Initial evaluation
     if val_loader is not None:
@@ -524,7 +568,7 @@ def train_autoencoder_distributed(
                     accelerator.wait_for_everyone()
                     unwrapped_model = accelerator.unwrap_model(ae_model)
                     os.makedirs(args.output_dir, exist_ok=True)
-                    save_path = os.path.join(args.output_dir, f"best_ae_ld{args.latent_dim}.pt")
+                    save_path = os.path.join(args.output_dir, f"best_ae_crossattn_ld{args.latent_dim}.pt")
                     torch.save(unwrapped_model.state_dict(), save_path)
                     print(f"Saved best model to {save_path}")
                 else:
@@ -559,6 +603,7 @@ def main():
     parser.add_argument("--teacher_path", type=str, required=True)
     parser.add_argument("--tokenizer_path", type=str, default=None)
     parser.add_argument("--latent_dim", type=int, default=4)
+    parser.add_argument("--num_heads", type=int, default=8, help="Number of attention heads for cross-attention decoder")
     parser.add_argument("--train_samples", type=int, default=None)
     parser.add_argument("--val_samples", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=32, help="Sequence batch size per GPU")
@@ -629,13 +674,34 @@ def main():
     else:
         # Fallback or error
         teacher_embed = teacher_model.get_input_embeddings()
+    
+    # Check if num_heads divides hidden_dim
+    if hidden_dim % args.num_heads != 0:
+        if accelerator.is_main_process:
+            print(f"Warning: hidden_dim ({hidden_dim}) not divisible by num_heads ({args.num_heads})")
+            print(f"Adjusting num_heads to largest divisor <= {args.num_heads}")
+        # Find largest divisor
+        for nh in range(args.num_heads, 0, -1):
+            if hidden_dim % nh == 0:
+                args.num_heads = nh
+                break
+        if accelerator.is_main_process:
+            print(f"Using num_heads = {args.num_heads}")
 
-    # 4. Initialize AE
-    ae_model = ConditionalAutoEncoder(
+    # 4. Initialize AE with Cross-Attention Decoder
+    ae_model = ConditionalAutoEncoderCrossAttn(
         input_dim=hidden_dim,
         latent_dim=args.latent_dim,
-        teacher_embed=teacher_embed
+        teacher_embed=teacher_embed,
+        num_heads=args.num_heads
     )
+    
+    if accelerator.is_main_process:
+        print(f"AE Model initialized:")
+        print(f"  Input Dim: {hidden_dim}")
+        print(f"  Latent Dim: {args.latent_dim}")
+        print(f"  Decoder: Cross-Attention (Z → Y_emb)")
+        print(f"  Attention Heads: {args.num_heads}")
     
     # 5. Start Training
     train_autoencoder_distributed(args, ae_model, teacher_model, tokenizer, accelerator)

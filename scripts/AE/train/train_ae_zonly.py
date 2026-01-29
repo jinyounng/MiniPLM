@@ -20,20 +20,21 @@ except ImportError:
     print("Warning: data_utils not found. Ensure the path is correct.")
 
 # ========================================================================================
-# AutoEncoder Model
+# AutoEncoder Model - Y_emb Only Decoder (Baseline)
 # ========================================================================================
 
-class ConditionalAutoEncoder(nn.Module):
-    """AutoEncoder with Y condition (using teacher embedding)"""
+class ConditionalAutoEncoderZOnly(nn.Module):
+    """AutoEncoder with Y condition - Decoder uses ONLY Z (ignores Y_emb)
+    This is a baseline to compare: Can Z alone reconstruct hidden without Y_emb?
+    """
     def __init__(self, input_dim=1600, latent_dim=8, teacher_embed=None):
         super().__init__()
         self.input_dim = input_dim
         self.latent_dim = latent_dim
         
         # Y condition embedding: use teacher's word embedding (frozen)
-        # DDP 환경에서 parameter 충돌을 피하기 위해 weight만 복사해서 buffer로 등록
+        # Encoder에서는 사용하지만 decoder에서는 사용 안 함
         if teacher_embed is not None:
-            # teacher_embed의 weight만 복사해서 buffer로 등록 (gradient 없음)
             self.register_buffer('y_embed_weight', teacher_embed.weight.data.clone())
             self.y_embed_num_embeddings = teacher_embed.num_embeddings
             self.y_embed_embedding_dim = teacher_embed.embedding_dim
@@ -42,7 +43,7 @@ class ConditionalAutoEncoder(nn.Module):
             self.y_embed_num_embeddings = None
             self.y_embed_embedding_dim = None
         
-        # Encoder input: hidden + teacher_embed(y)
+        # Encoder input: hidden + teacher_embed(y) - 원래대로
         enc_input_dim = input_dim * 2 
         
         # Encoder Structure Construction
@@ -57,28 +58,26 @@ class ConditionalAutoEncoder(nn.Module):
         
         encoder_layers = []
         for i in range(len(enc_dims) - 1):
-            encoder_layers.append(nn.Linear(enc_dims[i], enc_dims[i+1]))
+            encoder_layers.append(nn.Linear(enc_dims[i], enc_dims[i + 1]))
             if i < len(enc_dims) - 2:
-                encoder_layers.append(nn.LayerNorm(enc_dims[i+1]))
+                encoder_layers.append(nn.LayerNorm(enc_dims[i + 1]))
                 encoder_layers.append(nn.GELU())
         self.encoder = nn.Sequential(*encoder_layers)
         
-        # Decoder Structure Construction
-        dec_input_dim = latent_dim + input_dim
-        decoder_dims = self._get_dims(dec_input_dim, input_dim)
-        
+        # Decoder: Z ONLY → hidden (Y_emb는 무시)
+        # Z를 hidden으로 변환하는 MLP (점진적으로 확장)
+        decoder_dims = self._get_dims(latent_dim, input_dim)
         decoder_layers = []
         for i in range(len(decoder_dims) - 1):
-            decoder_layers.append(nn.Linear(decoder_dims[i], decoder_dims[i+1]))
+            decoder_layers.append(nn.Linear(decoder_dims[i], decoder_dims[i + 1]))
             if i < len(decoder_dims) - 2:
-                decoder_layers.append(nn.LayerNorm(decoder_dims[i+1]))
+                decoder_layers.append(nn.LayerNorm(decoder_dims[i + 1]))
                 decoder_layers.append(nn.GELU())
         decoder_layers.append(nn.LayerNorm(input_dim))
         self.decoder = nn.Sequential(*decoder_layers)
-    
+        
     def _embed_y(self, y_token):
         """Separate method for y embedding (DDP-safe)"""
-        # F.embedding 사용 (buffer는 parameter가 아니므로 DDP 문제 없음)
         return F.embedding(y_token, self.y_embed_weight)
     
     def _get_dims(self, input_dim, latent_dim):
@@ -99,11 +98,12 @@ class ConditionalAutoEncoder(nn.Module):
         # Ensure hidden is also float32 for consistency
         hidden_f32 = hidden.float()
         
+        # Encoder: [hidden + Y_emb] → Z (원래대로)
         enc_input = torch.cat([hidden_f32, cond], dim=-1)
-        z = self.encoder(enc_input)
+        z = self.encoder(enc_input)  # [B, latent_dim]
         
-        dec_input = torch.cat([z, cond], dim=-1)
-        recon = self.decoder(dec_input)
+        # Decoder: Z ONLY → hidden (Y_emb 무시)
+        recon = self.decoder(z)  # [B, input_dim]
         
         return recon, z
 
@@ -426,6 +426,7 @@ def train_autoencoder_distributed(
     if accelerator.is_main_process:
         print(f"Start Training on {accelerator.num_processes} GPUs")
         print("Evaluation will be performed at the end of each epoch to prevent DDP desynchronization.")
+        print(f"Decoder: Z ONLY (Y_emb ignored) - Baseline for comparison")
     
     # Initial evaluation
     if val_loader is not None:
@@ -524,7 +525,7 @@ def train_autoencoder_distributed(
                     accelerator.wait_for_everyone()
                     unwrapped_model = accelerator.unwrap_model(ae_model)
                     os.makedirs(args.output_dir, exist_ok=True)
-                    save_path = os.path.join(args.output_dir, f"best_ae_ld{args.latent_dim}.pt")
+                    save_path = os.path.join(args.output_dir, f"best_ae_zonly_ld{args.latent_dim}.pt")
                     torch.save(unwrapped_model.state_dict(), save_path)
                     print(f"Saved best model to {save_path}")
                 else:
@@ -630,12 +631,20 @@ def main():
         # Fallback or error
         teacher_embed = teacher_model.get_input_embeddings()
 
-    # 4. Initialize AE
-    ae_model = ConditionalAutoEncoder(
+    # 4. Initialize AE - Z Only Decoder
+    ae_model = ConditionalAutoEncoderZOnly(
         input_dim=hidden_dim,
         latent_dim=args.latent_dim,
         teacher_embed=teacher_embed
     )
+    
+    if accelerator.is_main_process:
+        print(f"AE Model initialized:")
+        print(f"  Input Dim: {hidden_dim}")
+        print(f"  Latent Dim: {args.latent_dim}")
+        print(f"  Encoder: [hidden + Y_emb] → Z (원래대로)")
+        print(f"  Decoder: Z ONLY → hidden (Y_emb ignored) - Baseline")
+        print(f"  Note: Decoder uses only Z to reconstruct hidden")
     
     # 5. Start Training
     train_autoencoder_distributed(args, ae_model, teacher_model, tokenizer, accelerator)

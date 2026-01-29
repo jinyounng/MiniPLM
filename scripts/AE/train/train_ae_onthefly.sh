@@ -27,7 +27,7 @@ DATA_PATH="/home/jiwonyoon/data1/data/pile_dataset/data_0"  # data_0.bin만 사�
 OUTPUT_DIR="${BASE_PATH}/checkpoints/AE/logit_only/layernorm"
 
 # Training parameters
-LATENT_DIM=${3-25}              # Latent dimension (default: 25)
+LATENT_DIM=${3-40}              # Latent dimension (default: 25)
 # TRAIN_SAMPLES는 전달하지 않아서 data_0의 모든 데이터 사용
 VAL_SAMPLES=${4-1000}           # Number of validation sequences (default: 1000)
 BATCH_SIZE=${5-16}              # Batch size per GPU (default: 32, total = 32 * 8 = 256)

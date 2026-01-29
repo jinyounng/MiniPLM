@@ -1,0 +1,9 @@
+{
+  "logit_mse": 17.183603596237106,
+  "logit_kl": 3.4296447950881666,
+  "hidden_mse": 26.85683402276018,
+  "hidden_cosine": 0.3103956221613937,
+  "num_samples": 1023764,
+  "checkpoint_path": "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/condition_RVQ/best_rvq_emb_s25_c4096_g0p95_d1024_enc4_dec4.pt",
+  "model_type": "rvq"
+}

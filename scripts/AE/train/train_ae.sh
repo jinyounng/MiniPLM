@@ -26,7 +26,7 @@ OUTPUT_DIR="${BASE_PATH}/checkpoints/AE/logit_only/layernorm"
 PRE_EXTRACTED_PATH="${BASE_PATH}/data/hidden_states/data_0_hidden_states.pt"  # 미리 추출된 hidden states (없으면 자동 추출)
 
 # Training parameters
-LATENT_DIM=${3-25}              # Latent dimension (default: 25)
+LATENT_DIM=${3-40}              # Latent dimension (default: 25)
 # TRAIN_SAMPLES는 전달하지 않아서 data_0의 모든 데이터 사용
 VAL_SAMPLES=${4-500}           # Number of validation samples (default: 1000)
 BATCH_SIZE=${5-512}             # Batch size (default: 256)
