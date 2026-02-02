@@ -16,7 +16,12 @@ class LMHarnessEvaluator(BaseEvaluator):
 
     def setup(self):
         super().setup()
+        # Suppress warnings
         datasets.utils.logging.set_verbosity_error()
+        import warnings
+        import transformers
+        warnings.filterwarnings("ignore")
+        transformers.utils.logging.set_verbosity_error()
         self.print_and_save(f"Evaluate on {self.args.eval_data_names}")
         self.tasks = self.args.eval_data_names.split(",")
         self.model_args = {

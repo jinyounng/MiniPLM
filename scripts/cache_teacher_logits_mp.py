@@ -152,30 +152,30 @@ def load_or_compute_shard_info(output_dir: str, all_shard_paths: List[str]) -> T
 
 
 def save_sparse_data(sparse_data_list: list, output_path: str, method: str, shard_id: int, global_offset: int):
-    """Sparse data를 npz 형식으로 저장"""
+    """Sparse data를 npz 형식으로 저장 (bin 순서대로 저장됨 → 같은 인덱스 = 같은 시퀀스)"""
     all_seq_lens = []
     all_local_indices = []
     all_global_indices = []
-    
+
     if method == 'both':
         all_topk_token_ids = []
         all_topk_probs = []
         all_sparse_token_ids = []
         all_sparse_counts = []
         all_sparse_lengths = []
-        
+
         for data in sparse_data_list:
             all_seq_lens.append(data['seq_len'])
             all_local_indices.append(data['local_idx'])
             all_global_indices.append(data['global_idx'])
-            
+
             all_topk_token_ids.append(data['topk']['token_ids'])
             all_topk_probs.append(data['topk']['probs'])
-            
+
             all_sparse_token_ids.append(data['sparse']['token_ids'])
             all_sparse_counts.append(data['sparse']['counts'])
             all_sparse_lengths.append(data['sparse']['lengths'])
-        
+
         save_dict = {
             'topk_token_ids': np.array(all_topk_token_ids, dtype=object),
             'topk_probs': np.array(all_topk_probs, dtype=object),
@@ -201,7 +201,7 @@ def save_sparse_data(sparse_data_list: list, output_path: str, method: str, shar
             all_seq_lens.append(data['seq_len'])
             all_local_indices.append(data['local_idx'])
             all_global_indices.append(data['global_idx'])
-            
+
             if method == 'random':
                 all_values.append(data['counts'])
                 all_lengths.append(data['lengths'])
@@ -224,7 +224,7 @@ def save_sparse_data(sparse_data_list: list, output_path: str, method: str, shar
             save_dict['num_samples'] = np.array(sparse_data_list[0]['num_samples'])
         else:
             save_dict['k'] = np.array(sparse_data_list[0]['k'])
-    
+
     np.savez(output_path, **save_dict)  # 비압축: 5-10배 빠름, 파일 크기 ~3배
     
     # 메모리 해제
@@ -530,7 +530,7 @@ def worker_fn(
                                 'seq_len': actual_len
                             }
                             all_sparse_data.append(sparse_data)
-                    
+
                     else:  # random
                         # Random: flatten하여 한번에 처리
                         probs_flat = probs.reshape(-1, vocab_size)  # [batch*seq, vocab]
@@ -666,7 +666,7 @@ def worker_fn(
                         all_seq_lens = np.concatenate([d['seq_lens'] for d in gpu_data_list], axis=0)
                         all_local_indices = np.concatenate([d['local_indices'] for d in gpu_data_list], axis=0)
                         all_global_indices = np.concatenate([d['global_indices'] for d in gpu_data_list], axis=0)
-                        
+
                         # local_idx로 정렬 (벡터화)
                         sort_idx = np.argsort(all_local_indices)
                         all_topk_token_ids = all_topk_token_ids[sort_idx]
@@ -677,7 +677,7 @@ def worker_fn(
                         all_seq_lens = all_seq_lens[sort_idx]
                         all_local_indices = all_local_indices[sort_idx]
                         all_global_indices = all_global_indices[sort_idx]
-                        
+
                         # 딕셔너리로 변환 (한 번만)
                         num_sequences = len(all_seq_lens)
                         all_sparse_data_merged = []
@@ -714,10 +714,10 @@ def worker_fn(
                         all_seq_lens = np.concatenate([d['seq_lens'] for d in gpu_data_list], axis=0)
                         all_local_indices = np.concatenate([d['local_indices'] for d in gpu_data_list], axis=0)
                         all_global_indices = np.concatenate([d['global_indices'] for d in gpu_data_list], axis=0)
-                        
+
                         if args.method == 'random':
                             all_lengths = np.concatenate([d['lengths'] for d in gpu_data_list], axis=0)
-                        
+
                         # local_idx로 정렬
                         sort_idx = np.argsort(all_local_indices)
                         all_token_ids = all_token_ids[sort_idx]
@@ -727,7 +727,7 @@ def worker_fn(
                         all_global_indices = all_global_indices[sort_idx]
                         if args.method == 'random':
                             all_lengths = all_lengths[sort_idx]
-                        
+
                         # 딕셔너리로 변환
                         num_sequences = len(all_seq_lens)
                         all_sparse_data_merged = []

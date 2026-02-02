@@ -14,18 +14,11 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from utils import print_rank, save_rank
 from pretrain.trainer import PreTrainer
-from data_utils.sparse_kd_datasets import SparseKDLMDataset
+from data_utils.sparse_kd_datasets_hdf5 import SparseKDLMDatasetHDF5
 from train_eval_utils.sparse_kd_loss import (
     compute_sparse_kd_loss,
     compute_sparse_kd_entropy
 )
-
-# HDF5 dataset (optional)
-try:
-    from data_utils.sparse_kd_datasets_hdf5 import SparseKDLMDatasetHDF5
-    HDF5_AVAILABLE = True
-except ImportError:
-    HDF5_AVAILABLE = False
 
 
 class OfflineKDPreTrainer(PreTrainer):
@@ -64,45 +57,32 @@ class OfflineKDPreTrainer(PreTrainer):
     
     def set_datasets(self, args=None, do_train=True):
         """
-        SparseKDLMDataset 또는 SparseKDLMDatasetHDF5 사용
-        
-        HDF5 파일이 있으면 HDF5 dataset 사용 (메모리 효율적)
-        없으면 기존 NPZ dataset 사용
+        SparseKDLMDatasetHDF5만 사용 (HDF5 전용).
+        cached_logits_dir에 data_*.h5 또는 shard_*.h5가 있어야 함.
         """
         args = args or self.args
         data_split = args.data_split or "data"
-        
-        # HDF5 사용 여부 결정
-        use_hdf5 = False
-        if HDF5_AVAILABLE and args.cached_logits_dir:
-            # HDF5 shard 파일이 있는지 확인 (data_*.h5 또는 shard_*.h5)
+
+        if args.cached_logits_dir:
             import glob as glob_module
             h5_files = glob_module.glob(os.path.join(args.cached_logits_dir, 'data_*.h5'))
             if not h5_files:
                 h5_files = glob_module.glob(os.path.join(args.cached_logits_dir, 'shard_*.h5'))
-            npz_files = glob_module.glob(os.path.join(args.cached_logits_dir, 'data_*.npz'))
-            if not npz_files:
-                npz_files = glob_module.glob(os.path.join(args.cached_logits_dir, 'shard_*.npz'))
-            
-            # H5만 있고 NPZ가 없으면 HDF5 사용
-            # 혼합되어 있으면 NPZ 사용 (호환성)
-            if h5_files and not npz_files:
-                use_hdf5 = True
-                print_rank("### Using HDF5 format (memory-efficient)")
-            elif h5_files and npz_files:
-                print_rank("### Mixed format detected (H5 + NPZ), using NPZ dataset for compatibility")
-                use_hdf5 = False
-        
-        DatasetClass = SparseKDLMDatasetHDF5 if use_hdf5 else SparseKDLMDataset
+            if not h5_files:
+                raise FileNotFoundError(
+                    f"No HDF5 logits shards in {args.cached_logits_dir}. "
+                    "Expected data_*.h5 or shard_*.h5"
+                )
+            print_rank("### Using HDF5 format (memory-efficient)")
         
         if do_train:
             print_rank("### Using data from directory: {}".format(args.data_dir))
             print_rank("### Using cached logits from: {}".format(args.cached_logits_dir))
-            print_rank("### Dataset class: {}".format(DatasetClass.__name__))
-            
+            print_rank("### Dataset class: SparseKDLMDatasetHDF5")
+
             assert args.dev_data_dir is None or not os.path.samefile(args.dev_data_dir, args.data_dir)
-            
-            self.train_dataset = DatasetClass(
+
+            self.train_dataset = SparseKDLMDatasetHDF5(
                 args, 
                 self.tokenizer, 
                 data_split, 
@@ -114,7 +94,7 @@ class OfflineKDPreTrainer(PreTrainer):
             print_rank("### Training Data Number: {}".format(len(self.train_dataset)))
             
             if self.args.do_valid and args.dev_data_dir is not None:
-                self.eval_dataset = DatasetClass(
+                self.eval_dataset = SparseKDLMDatasetHDF5(
                     args,
                     self.tokenizer,
                     data_split,
@@ -127,7 +107,7 @@ class OfflineKDPreTrainer(PreTrainer):
             else:
                 self.eval_dataset = None
         else:
-            self.eval_dataset = DatasetClass(
+            self.eval_dataset = SparseKDLMDatasetHDF5(
                 args,
                 self.tokenizer,
                 data_split,

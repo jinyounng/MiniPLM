@@ -1,43 +1,40 @@
 #! /bin/bash
-# Offline KD with Top-K Sampling - 200M Model
-#
-# Cached teacher logits를 사용한 Knowledge Distillation
-# method: topk - Top-K 토큰의 확률만 사용 (normalized)
-
-
+export NCCL_DEBUG=INFO
+export NCCL_IB_DISABLE=1
+export NCCL_SOCKET_IFNAME=^lo
+export MASTER_ADDR=192.168.129.92
 BASE_PATH=${1-"/home/jiwonyoon/data1/projects/MiniPLM"}
-MASTER_PORT=${2-2070}
+MASTER_PORT=${2-29700}
 GPUS_PER_NODE=${3-8}
+export MASTER_PORT
 NNODES=1
+# HOSTFILE=${5-hostfile_8V100_0_1}
 
 DISTRIBUTED_ARGS="--num_gpus $GPUS_PER_NODE \
                   --num_nodes $NNODES \
                   --master_port $MASTER_PORT"
+                  #--hostfile $BASE_PATH/configs/hostfiles/$HOSTFILE
 
 # type
-TYPE="offline_kd"
-# model
-CKPT_NAME="qwen/200M"
-CKPT="/home/jiwonyoon/data1/checkpoints/${CKPT_NAME}"
-# cached logits (Top-K 사용, HDF5 포맷)
-CACHED_LOGITS_DIR="/home/jiwonyoon/data1/data/logits_hdf5"
-KD_METHOD="topk"  # 'topk' or 'sparse' (method='both'일 때 선택)
+TYPE="vanilla_kd"
+# model: 2stage = vanilla KD initialized from 1stage AE-KD checkpoint
+CKPT_NAME="qwen/200M-2stage-from-1stage"
+CKPT="${BASE_PATH}/results/AE/kd/1stage_ld40_5e-4/epoch_1"
+TEACHER_CKPT_NAME="7B"
+TEACHER_MODEL_PATH="/home/jiwonyoon/data1/checkpoints/qwen/7B"
 # data
 DATA_DIR="/home/jiwonyoon/data1/data/pile_dataset"
 DATA_NAME="miniplm_refined_corpus"
-WANDB_NAME="200M-offline-kd-topk"
-# hp (vanilla_kd/200M.sh와 동일)
-BATCH_SIZE=32
+WANDB_NAME="200M-vanilla-kd-2stage-from-1stage"
+# hp
+BATCH_SIZE=16
 LR=0.0006
 LR_MIN=0.00006
-GRAD_ACC=2
-# KD hyperparameters
-ALPHA=0.5              # KD loss 가중치 (0~1, 클수록 KD에 더 가중치)
-KD_TEMPERATURE=1.0     # Temperature scaling (sparse KD에서는 1.0 권장)
+GRAD_ACC=4
 # length
 MAX_LENGTH=1024
 # runtime
-SAVE_PATH="${BASE_PATH}/results/${TYPE}/topk"
+SAVE_PATH="${BASE_PATH}/results/${TYPE}"
 # seed
 SEED=10
 
@@ -50,15 +47,15 @@ OPTS+=" --model-type qwen"
 OPTS+=" --base-path ${BASE_PATH}"
 OPTS+=" --model-path ${CKPT}"
 OPTS+=" --ckpt-name ${CKPT_NAME}"
+OPTS+=" --teacher-model-type qwen"
+OPTS+=" --teacher-model-path ${TEACHER_MODEL_PATH}"
+OPTS+=" --teacher-ckpt-name ${TEACHER_CKPT_NAME}"
 OPTS+=" --n-gpu ${GPUS_PER_NODE}"
 OPTS+=" --n-nodes ${NNODES}"
 # OPTS+=" --gradient-checkpointing"
-OPTS+=" --from-scratch"
-# offline KD specific
-OPTS+=" --cached-logits-dir ${CACHED_LOGITS_DIR}"
-OPTS+=" --kd-method ${KD_METHOD}"
-OPTS+=" --alpha ${ALPHA}"
-OPTS+=" --kd-temperature ${KD_TEMPERATURE}"
+# Load from 1stage checkpoint (do NOT use --from-scratch)
+# OPTS+=" --from-scratch"
+# OPTS+=" --torch-compile reduce-overhead"
 # data
 OPTS+=" --data-name ${DATA_NAME}"
 OPTS+=" --data-dir ${DATA_DIR}"
@@ -82,7 +79,7 @@ OPTS+=" --total-iters 100000"
 OPTS+=" --max-length ${MAX_LENGTH}"
 # runtime
 OPTS+=" --do-train"
-OPTS+=" --save-interval 20000"
+OPTS+=" --save-interval 1000"
 OPTS+=" --log-interval 10"
 OPTS+=" --mid-log-num -1"
 OPTS+=" --save ${SAVE_PATH}"
@@ -93,7 +90,7 @@ OPTS+=" --seed ${SEED}"
 OPTS+=" --deepspeed"
 OPTS+=" --deepspeed_config ${BASE_PATH}/configs/deepspeed/ds_config.json"
 # wandb
-OPTS+=" --wandb-group offline_kd"
+OPTS+=" --wandb-group pretrain_scratch"
 OPTS+=" --wandb-name ${WANDB_NAME}"
 
 

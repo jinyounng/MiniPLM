@@ -1,9 +1,9 @@
 {
-  "logit_mse": 17.05850355581212,
-  "logit_kl": 0.7305949108346894,
-  "hidden_mse": 23.593918138966274,
-  "hidden_cosine": 0.45212951329269324,
-  "num_samples": 1023764,
+  "logit_mse": 16.97426847930372,
+  "logit_kl": 0.7308949637440508,
+  "hidden_mse": 23.507084939879636,
+  "hidden_cosine": 0.4543123821297543,
+  "num_samples": 1023660,
   "checkpoint_path": "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/logit_only/layernorm/best_ae_ld25.pt",
   "model_type": "ae"
 }

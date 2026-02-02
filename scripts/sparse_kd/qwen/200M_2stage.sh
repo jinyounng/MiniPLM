@@ -1,13 +1,16 @@
 #! /bin/bash
-# Offline KD with Top-K Sampling - 200M Model
+# Sparse KD 2stage: offline_kd (sparse) initialized from 1stage AE-KD checkpoint
 #
-# Cached teacher logits를 사용한 Knowledge Distillation
-# method: topk - Top-K 토큰의 확률만 사용 (normalized)
+# Cached teacher logits + Sparse loss, student = 1stage epoch_1
 
-
+export NCCL_DEBUG=INFO
+export NCCL_IB_DISABLE=1
+export NCCL_SOCKET_IFNAME=^lo
+export MASTER_ADDR=192.168.129.92
 BASE_PATH=${1-"/home/jiwonyoon/data1/projects/MiniPLM"}
-MASTER_PORT=${2-2070}
+MASTER_PORT=${2-29702}
 GPUS_PER_NODE=${3-8}
+export MASTER_PORT
 NNODES=1
 
 DISTRIBUTED_ARGS="--num_gpus $GPUS_PER_NODE \
@@ -16,45 +19,40 @@ DISTRIBUTED_ARGS="--num_gpus $GPUS_PER_NODE \
 
 # type
 TYPE="offline_kd"
-# model
-CKPT_NAME="qwen/200M"
-CKPT="/home/jiwonyoon/data1/checkpoints/${CKPT_NAME}"
-# cached logits (Top-K 사용, HDF5 포맷)
-CACHED_LOGITS_DIR="/home/jiwonyoon/data1/data/logits_hdf5"
-KD_METHOD="topk"  # 'topk' or 'sparse' (method='both'일 때 선택)
+# model: 2stage = Sparse KD initialized from 1stage AE-KD checkpoint
+CKPT_NAME="qwen/200M-2stage-sparse-from-1stage"
+CKPT="${BASE_PATH}/results/AE/kd/1stage_ld40_5e-4/epoch_1"
+# cached logits (Sparse 사용)
+CACHED_LOGITS_DIR="${CACHED_LOGITS_DIR:-/home/jiwonyoon/data1/data/logits_hdf5}"
+KD_METHOD="sparse"
 # data
 DATA_DIR="/home/jiwonyoon/data1/data/pile_dataset"
 DATA_NAME="miniplm_refined_corpus"
-WANDB_NAME="200M-offline-kd-topk"
-# hp (vanilla_kd/200M.sh와 동일)
+WANDB_NAME="200M-sparse-kd-2stage-from-1stage"
+# hp (vanilla_kd 2stage와 동일)
 BATCH_SIZE=32
 LR=0.0006
 LR_MIN=0.00006
 GRAD_ACC=2
-# KD hyperparameters
-ALPHA=0.5              # KD loss 가중치 (0~1, 클수록 KD에 더 가중치)
-KD_TEMPERATURE=1.0     # Temperature scaling (sparse KD에서는 1.0 권장)
+ALPHA=0.5
+KD_TEMPERATURE=1.0
 # length
 MAX_LENGTH=1024
 # runtime
-SAVE_PATH="${BASE_PATH}/results/${TYPE}/topk"
-# seed
+SAVE_PATH="${BASE_PATH}/results/${TYPE}/sparse_kd"
 SEED=10
 
-
 OPTS=""
-# type
 OPTS+=" --type ${TYPE}"
-# model
 OPTS+=" --model-type qwen"
 OPTS+=" --base-path ${BASE_PATH}"
 OPTS+=" --model-path ${CKPT}"
 OPTS+=" --ckpt-name ${CKPT_NAME}"
 OPTS+=" --n-gpu ${GPUS_PER_NODE}"
 OPTS+=" --n-nodes ${NNODES}"
-# OPTS+=" --gradient-checkpointing"
-OPTS+=" --from-scratch"
-# offline KD specific
+# Load from 1stage (do NOT use --from-scratch)
+# OPTS+=" --from-scratch"
+# offline KD (Sparse)
 OPTS+=" --cached-logits-dir ${CACHED_LOGITS_DIR}"
 OPTS+=" --kd-method ${KD_METHOD}"
 OPTS+=" --alpha ${ALPHA}"
@@ -78,24 +76,18 @@ OPTS+=" --adam-beta 0.9"
 OPTS+=" --adam-beta2 0.98"
 OPTS+=" --adam-eps 1e-6"
 OPTS+=" --total-iters 100000"
-# length
 OPTS+=" --max-length ${MAX_LENGTH}"
-# runtime
 OPTS+=" --do-train"
 OPTS+=" --save-interval 20000"
 OPTS+=" --log-interval 10"
 OPTS+=" --mid-log-num -1"
 OPTS+=" --save ${SAVE_PATH}"
 OPTS+=" --no-eval-when-start"
-# seed
 OPTS+=" --seed ${SEED}"
-# deepspeed
 OPTS+=" --deepspeed"
 OPTS+=" --deepspeed_config ${BASE_PATH}/configs/deepspeed/ds_config.json"
-# wandb
-OPTS+=" --wandb-group offline_kd"
+OPTS+=" --wandb-group offline_kd_sparse"
 OPTS+=" --wandb-name ${WANDB_NAME}"
-
 
 export NCCL_DEBUG=""
 export TF_CPP_MIN_LOG_LEVEL=3

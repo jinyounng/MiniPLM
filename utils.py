@@ -255,6 +255,10 @@ def get_tokenizer(args, model_path=None, model_type=None, peft=None, peft_path=N
     peft = args.peft if peft is None else peft
     model_type = args.model_type if model_type is None else model_type
     model_path = args.model_path if model_path is None else model_path
+    # When loading from a checkpoint that has no tokenizer files (e.g. 1stage FM ckpt), use tokenizer_path
+    tokenizer_path = getattr(args, 'tokenizer_path', None) or model_path
+    if tokenizer_path is None:
+        tokenizer_path = model_path
     
     if peft:
         peft_path = args.peft_path if peft_path is None else peft_path
@@ -264,10 +268,10 @@ def get_tokenizer(args, model_path=None, model_type=None, peft=None, peft_path=N
             base_model_path = peft_config.base_model_name_or_path
             tokenizer = AutoTokenizer.from_pretrained(base_model_path)
         else:
-            assert model_path is not None, "Model path is not specified when loading peft model"
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            assert tokenizer_path is not None, "Model path / tokenizer path is not specified when loading peft model"
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     else:
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     
     if model_type in PAD_EOS_MODELS:
         # print_and_save_rank("tokenizer: pad = eos", os.path.join(args.save, "log.txt"))

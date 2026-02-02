@@ -1,0 +1,9 @@
+{
+  "logit_mse": 17.539353976320406,
+  "logit_kl": 1.4703730783929645,
+  "hidden_mse": 27.271164972223204,
+  "hidden_cosine": 0.26691222025829986,
+  "num_samples": 1023660,
+  "checkpoint_path": "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/zonly/best_ae_zonly_ld40.pt",
+  "model_type": "ae_zonly"
+}

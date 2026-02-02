@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.distributed import get_rank
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler, RandomSampler, SequentialSampler
 from torch.optim import AdamW, SGD, Adam
 from data_utils.prompt_datasets import PromptDataset
 
@@ -163,11 +163,24 @@ class BaseTrainer():
     def prepare_learning(self, args=None):
         args = args or self.args
         self.total_batch_size = args.batch_size * self.dp_world_size * args.gradient_accumulation_steps
-        self.train_iters_per_epoch = int(len(self.train_dataset) / self.total_batch_size)
+        # rank 분할 데이터셋(offline_kd 등): 각 rank가 이미 1/8 데이터를 갖고 있음
+        # DistributedSampler를 쓰면 또 8등분해서 1/64만 사용하게 되므로, 로컬 sampler 사용
+        # train_iters_per_epoch는 global step 기준이어야 함 (total_iters와 단위 맞춤)
+        rank_split = getattr(self.train_dataset, "global_len", None) is not None
+        if rank_split:
+            per_rank_len = len(self.train_dataset)
+            # global step per epoch = per_rank_len / (batch_size * grad_acc)
+            # 이렇게 해야 Pretrain과 같은 global step 기준이 됨
+            per_rank_samples_per_step = args.batch_size * args.gradient_accumulation_steps
+            self.train_iters_per_epoch = per_rank_len // per_rank_samples_per_step
+            self.train_dataset.set_num(self.train_iters_per_epoch * per_rank_samples_per_step)
+        else:
+            effective_len = len(self.train_dataset)
+            self.train_iters_per_epoch = int(effective_len / self.total_batch_size)
+            self.train_dataset.set_num(self.train_iters_per_epoch * self.total_batch_size)
         assert (args.epochs is not None) ^ (args.total_iters is not None), (args.epochs, args.total_iters)
         self.total_steps = args.total_iters or self.train_iters_per_epoch * args.epochs
         self.epochs = args.epochs or math.ceil(args.total_iters / self.train_iters_per_epoch)
-        self.train_dataset.set_num(self.train_iters_per_epoch * self.total_batch_size) # droplast
         
         if args.save_interval == -1:
             args.save_interval = self.train_iters_per_epoch
@@ -179,7 +192,12 @@ class BaseTrainer():
             if get_rank() == 0:
                 normal_order = np.arange(0, len(self.train_dataset), dtype=np.int32)
                 order = np.stack([np.random.permutation(normal_order) for _ in range(self.epochs)], axis=0)
-                order = order[:, :self.train_iters_per_epoch * self.total_batch_size] # droplast
+                # rank 분할이면 per_rank 샘플 수, 아니면 전체 샘플 수
+                if rank_split:
+                    drop_last_len = self.train_iters_per_epoch * self.args.batch_size * self.args.gradient_accumulation_steps
+                else:
+                    drop_last_len = self.train_iters_per_epoch * self.total_batch_size
+                order = order[:, :drop_last_len]
                 np.save(os.path.join(self.args.save, "data_order.npy"), order)
                 print("Data order size: ", order.shape)
             dist.barrier()
@@ -200,7 +218,13 @@ class BaseTrainer():
         self.train_dataloader, self.train_sampler = self.get_train_sampler_dataloader()
     
     def get_train_sampler_dataloader(self):
-        train_sampler = DistributedSampler(self.train_dataset, shuffle=((not self.args.precompute_data_order) and (not self.args.no_shuffle)), drop_last=True, rank=self.dp_rank, num_replicas=self.dp_world_size)
+        rank_split = getattr(self.train_dataset, "global_len", None) is not None
+        if rank_split:
+            # 각 rank가 이미 서로 다른 데이터 조각을 갖고 있으므로 DistributedSampler 사용 시 1/8만 사용됨 → 전체 사용하려면 로컬 sampler
+            shuffle = (not self.args.precompute_data_order) and (not self.args.no_shuffle)
+            train_sampler = RandomSampler(self.train_dataset) if shuffle else SequentialSampler(self.train_dataset)
+        else:
+            train_sampler = DistributedSampler(self.train_dataset, shuffle=((not self.args.precompute_data_order) and (not self.args.no_shuffle)), drop_last=True, rank=self.dp_rank, num_replicas=self.dp_world_size)
         train_dataloader = DataLoader(
             self.train_dataset, sampler=train_sampler, batch_size=self.args.batch_size, num_workers=self.args.num_workers, collate_fn=self.train_dataset.collate, drop_last=True)
         return train_dataloader, train_sampler

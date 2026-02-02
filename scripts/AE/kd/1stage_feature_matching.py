@@ -162,8 +162,7 @@ def train_one_epoch(
         y_token = batch["y_token"]
 
         with torch.no_grad():
-            recon_hidden, _ = ae_model(teacher_hidden, y_token=y_token)  # [N, H_teacher]
-            recon_hidden = recon_hidden.to(torch.bfloat16)  # match student dtype for loss/backward
+            recon_hidden, _ = ae_model(teacher_hidden, y_token=y_token)  # [N, H_teacher] float32
 
         student_outputs = student_model(
             input_ids=input_ids,
@@ -178,10 +177,13 @@ def train_one_epoch(
         if projection_module is not None:
             student_hidden_flat = projection_module(student_hidden_flat)  # [N, H_teacher]
 
+        # Loss in float32 to avoid "Found dtype BFloat16 but expected Float" under DDP/AMP
+        student_f32 = student_hidden_flat.float()
+        recon_f32 = recon_hidden.float()
         if loss_type == "mse":
-            loss = F.mse_loss(student_hidden_flat, recon_hidden)
+            loss = F.mse_loss(student_f32, recon_f32)
         else:
-            loss = (1 - F.cosine_similarity(student_hidden_flat, recon_hidden, dim=-1).mean())
+            loss = (1 - F.cosine_similarity(student_f32, recon_f32, dim=-1).mean())
 
         n = student_hidden_flat.size(0)
         total_loss += loss.item() * n

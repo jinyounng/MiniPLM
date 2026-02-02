@@ -13,6 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""
+DistributedMMapIndexedDataset with rank별 min_offset 자동 분배.
+offline_kd 등에서 사용: kwargs로 min_offset을 넘기지 않아도
+rank_total > 1일 때 total_length를 rank 수로 나누어 각 rank에 다른 min_offset/valid_length 부여.
+"""
+
 import os
 import struct
 
@@ -55,7 +61,7 @@ class DistributedMMapIndexedDataset(torch.utils.data.Dataset):
             with open(path, 'rb') as stream:
                 magic_test = stream.read(9)
                 assert self._HDR_MAGIC == magic_test, (
-                    'Index file doesn\'t match expected format. '
+                    'Index file doesn\'t expect format. '
                     'Make sure that --dataset-impl is configured properly.'
                 )
                 version = struct.unpack('<Q', stream.read(8))
@@ -103,10 +109,10 @@ class DistributedMMapIndexedDataset(torch.utils.data.Dataset):
         def __len__(self):
             return self._len
 
-    def __init__(self, path, name, rank_number=0, rank_total=1, do_probe=True, 
+    def __init__(self, path, name, rank_number=0, rank_total=1, do_probe=True,
                  min_state=0, max_state=None, min_offset=0, max_offset=None, min_ratio=None, max_ratio=None,
                  cache = None, load_to_ram=False):
-        
+
         super().__init__()
 
         self._path = path
@@ -132,13 +138,22 @@ class DistributedMMapIndexedDataset(torch.utils.data.Dataset):
 
         if min_ratio is not None:
             self.min_offset = int(min_ratio * self.total_length)
-        
+
         if max_ratio is not None:
             self.max_offset = int(max_ratio * self.total_length)
 
-        self.valid_length = min((self.max_offset if self.max_offset is not None else self.total_length), self.total_length) - self.min_offset
+        # rank별 자동 분배: min_offset/max_offset을 명시하지 않았을 때만
+        if rank_total > 1 and self.min_offset == 0 and self.max_offset is None:
+            chunk_size = self.total_length // rank_total
+            self.min_offset = rank_number * chunk_size
+            if rank_number == rank_total - 1:
+                self.valid_length = self.total_length - self.min_offset
+            else:
+                self.valid_length = chunk_size
+        else:
+            self.valid_length = min((self.max_offset if self.max_offset is not None else self.total_length), self.total_length) - self.min_offset
 
-        if not dist.is_initialized() or dist.get_rank() == 0:  
+        if not dist.is_initialized() or dist.get_rank() == 0:
             print(f"Probing end. Max data state {self.max_state}, total length {self.history[self.max_state-1][1]}, valid_length {self.valid_length}, min_offset {self.min_offset}")
 
         self._do_init(self._path, self._name, self._cache, self._state, do_probe, load_to_ram)
@@ -169,7 +184,7 @@ class DistributedMMapIndexedDataset(torch.utils.data.Dataset):
             state += 1
             if not do_probe:
                 break
-                
+
         return state, history, lens
 
     def __getstate__(self):
@@ -192,15 +207,15 @@ class DistributedMMapIndexedDataset(torch.utils.data.Dataset):
             source_file = os.path.join(path, name + f"_{self._state}")
         else:
             source_file = os.path.join(path, name)
-        
+
         assert os.path.exists(data_file_path(source_file)), "Data file not found: {}".format(data_file_path(source_file))
         assert os.path.exists(index_file_path(source_file)), "Index file not found: {}".format(index_file_path(source_file))
         self._index = self.Index(index_file_path(source_file))
-        
+
         if load_to_ram:
             print("Loading from file")
             self._bin_buffer = np.fromfile(data_file_path(source_file), dtype=self._index.dtype)
-            print("Loading from file done")    
+            print("Loading from file done")
         else:
             self._bin_buffer_mmap = np.memmap(data_file_path(source_file), mode='r', order='C')
             self._bin_buffer = memoryview(self._bin_buffer_mmap)
@@ -215,24 +230,9 @@ class DistributedMMapIndexedDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self.valid_length
 
-    # def _next_file(self):
-    #     self._state += 1
-    #     if self._state >= self.max_state:
-    #         # self._state = 0
-    #         raise StopIteration()
-    #     # print_rank(f"next_file: {self._state}")
-    #     self._do_init(self._path, self._name, self._cache, self._state, self._do_probe, self._load_to_ram)
-    
     def __relative_idx(self, idx):
         res = idx - self.history[self._state][0]
         return res
-
-    # def __slice_item(self, start, stop):
-    #     ptr = self._index._pointers[self.__relative_idx(start)]
-    #     sizes = self._index._sizes[self.__relative_idx(start):self.__relative_idx(stop)]
-    #     offsets = list(accumulate(sizes))
-    #     np_array = np.frombuffer(self._bin_buffer, dtype=self._index.dtype, count=sum(sizes), offset=ptr)
-    #     return np.split(np_array, offsets[:-1])
 
     def __getitem__(self, idx):
         # 먼저 원본 idx가 valid_length 범위 내인지 확인
@@ -247,13 +247,12 @@ class DistributedMMapIndexedDataset(torch.utils.data.Dataset):
                 # 안전장치: 그래도 범위를 벗어나면 마지막 유효 인덱스 사용
                 idx = self.total_length - 1
                 # print(f"Distributed index clamped. Original would exceed total_length: {self.total_length}")
-            
+
             origin_state = self._state
             while idx >= self.history[self._state][1] or idx < self.history[self._state][0]:
                 self._state += 1
                 if self._state >= self.max_state:
                     self._state = 0
-                # print(self._state)
             if self._state != origin_state:
                 self._do_init(self._path, self._name, self._cache, self._state, self._do_probe, self._load_to_ram)
             ptr, size = self._index[self.__relative_idx(idx)]
@@ -266,7 +265,7 @@ class DistributedMMapIndexedDataset(torch.utils.data.Dataset):
     @property
     def sizes(self):
         return self._index.sizes
-        
+
     def exists(self, path):
         return (
             os.path.exists(index_file_path(path)) and os.path.exists(data_file_path(path))

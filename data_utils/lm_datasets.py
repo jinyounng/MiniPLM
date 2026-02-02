@@ -15,7 +15,12 @@ class LMDataset(BaseDataset):
             return None
 
         if self.order is not None:
-            index = int(self.order[self.epoch, index])
+            # order array를 통해 실제 데이터 인덱스로 변환
+            # epoch이 order 범위를 벗어나면 modulo 사용
+            epoch_idx = self.epoch % self.order.shape[0]
+            # index가 order의 두 번째 차원을 벗어나면 modulo 사용
+            order_idx = index % self.order.shape[1]
+            index = int(self.order[epoch_idx, order_idx])
 
         data = self.data[index].astype(int)
     

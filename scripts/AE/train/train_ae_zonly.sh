@@ -1,20 +1,4 @@
 #!/bin/bash
-# Train AutoEncoder with Z-only Decoder (Baseline)
-#
-# 이 스크립트는 Z만 사용해서 hidden을 복원하는 AE를 학습합니다.
-# Encoder: [hidden + Y_emb] → Z (원래대로)
-# Decoder: Z ONLY → hidden (Y_emb 무시)
-#
-# 목적: Z만으로 복원이 가능한지 확인하는 baseline
-# 비교: train_ae_crossattn.sh (Z + Y_emb with Cross-Attention)
-#
-# 사용 예시:
-#   bash train_ae_zonly.sh
-#   bash train_ae_zonly.sh /path/to/teacher/model
-#   bash train_ae_zonly.sh /path/to/teacher/model 40
-#
-# 주의: accelerate config를 먼저 실행하여 설정해야 합니다.
-#       accelerate config
 
 BASE_PATH=${1-"/home/jiwonyoon/data1/projects/MiniPLM"}
 TEACHER_MODEL=${2-"/home/jiwonyoon/data1/checkpoints/qwen/7B"}
@@ -32,7 +16,7 @@ BATCH_SIZE=${5-32}              # Batch size per GPU
 EPOCHS=${6-1}                  # Number of epochs (default: 30)
 LR=${7-5e-4}                    # Learning rate (default: 5e-4)
 PATIENCE=${8-10}                # Early stopping patience (default: 10)
-MAX_LENGTH=${9-512}             # Max sequence length (default: 512)
+MAX_LENGTH=${9-1024}             # Max sequence length (default: 512)
 
 # Loss weights
 ALPHA_MSE=${10-0.0}             # MSE loss weight (default: 2.0)

@@ -20,7 +20,9 @@ DISTRIBUTED_ARGS="--num_gpus $GPUS_PER_NODE \
 TYPE="pretrain"
 # model: load from 1stage FM checkpoint (no --from-scratch)
 CKPT_NAME="qwen/200M-2stage-sft"
-CKPT="${BASE_PATH}/checkpoints/KD/1stage_fm/epoch_3"
+CKPT="${BASE_PATH}/results/AE/kd/1stage_ld40_5e-4/epoch_1"
+# Tokenizer: 1stage ckpt has no tokenizer files; use original student config path (must have tokenizer.json etc.)
+TOKENIZER_PATH="/home/jiwonyoon/data1/checkpoints/qwen/200M"
 # or use a fixed path: CKPT="/home/jiwonyoon/data1/checkpoints/qwen/200M/"
 # data
 DATA_DIR="/home/jiwonyoon/data1/data/pile_dataset"
@@ -45,6 +47,7 @@ OPTS+=" --type ${TYPE}"
 OPTS+=" --model-type qwen"
 OPTS+=" --base-path ${BASE_PATH}"
 OPTS+=" --model-path ${CKPT}"
+OPTS+=" --tokenizer-path ${TOKENIZER_PATH}"
 OPTS+=" --ckpt-name ${CKPT_NAME}"
 OPTS+=" --n-gpu ${GPUS_PER_NODE}"
 OPTS+=" --n-nodes ${NNODES}"

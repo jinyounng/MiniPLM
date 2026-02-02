@@ -15,6 +15,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 import sys
 import numpy as np
+from accelerate import Accelerator
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(_script_dir)))
@@ -35,7 +36,7 @@ from train_ae_onthefly import ConditionalAutoEncoder
 # ------------------------------------------------------------------------------
 
 class KDSequenceDataset(Dataset):
-    def __init__(self, data_path, max_samples=None, max_length=512, data_fraction=0.05):
+    def __init__(self, data_path, max_samples=None, max_length=512, data_fraction=0.05, rank=0, world_size=1):
         self.max_length = max_length
         if MMapIndexedDataset is None:
             raise RuntimeError("MMapIndexedDataset not available")
@@ -45,8 +46,13 @@ class KDSequenceDataset(Dataset):
             cap = min(max_samples, total)
         else:
             cap = max(1, int(total * data_fraction))
-        self.valid_indices = list(range(cap))
-        print(f"Save latent dataset: {len(self.valid_indices)} sequences (data_fraction={data_fraction:.2%}, total={total})")
+        full_indices = list(range(cap))
+        # Shard by rank for multi-GPU
+        self.valid_indices = full_indices[rank::world_size]
+        if world_size > 1:
+            print(f"Save latent dataset rank {rank}/{world_size}: {len(self.valid_indices)} sequences (shard of {cap})")
+        else:
+            print(f"Save latent dataset: {len(self.valid_indices)} sequences (data_fraction={data_fraction:.2%}, total={total})")
 
     def __len__(self):
         return len(self.valid_indices)
@@ -116,14 +122,22 @@ def main():
     parser.add_argument("--tokenizer_path", type=str, default=None)
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    accelerator = Accelerator()
+    device = accelerator.device
+    rank = accelerator.process_index
+    world_size = accelerator.num_processes
+
+    if accelerator.is_main_process:
+        print(f"Running on {world_size} GPU(s)")
+
     tokenizer_path = args.tokenizer_path or args.teacher_path
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # Teacher (frozen)
-    print("Loading teacher...")
+    if accelerator.is_main_process:
+        print("Loading teacher...")
     teacher_model = AutoModelForCausalLM.from_pretrained(
         args.teacher_path,
         torch_dtype=torch.bfloat16,
@@ -143,7 +157,8 @@ def main():
         teacher_embed = teacher_model.get_input_embeddings()
 
     # AE (frozen)
-    print("Loading AE...")
+    if accelerator.is_main_process:
+        print("Loading AE...")
     ae_model = ConditionalAutoEncoder(
         input_dim=teacher_hidden_dim,
         latent_dim=args.latent_dim,
@@ -154,12 +169,14 @@ def main():
     ae_model.to(device)
     ae_model.eval()
 
-    # Dataset & loader — same as 1stage
+    # Dataset & loader — shard by rank for multi-GPU
     dataset = KDSequenceDataset(
         args.data_path,
         max_samples=args.max_samples,
         max_length=args.max_length,
         data_fraction=args.data_fraction,
+        rank=rank,
+        world_size=world_size,
     )
 
     def collate_fn(batch):
@@ -173,12 +190,15 @@ def main():
         collate_fn=collate_fn,
     )
 
-    os.makedirs(args.save_dir, exist_ok=True)
+    # Each rank saves to its own subdir to avoid overwrite
+    save_dir_rank = os.path.join(args.save_dir, f"rank_{rank}") if world_size > 1 else args.save_dir
+    os.makedirs(save_dir_rank, exist_ok=True)
     total_tokens = 0
     chunk_list = []
 
-    print("Saving AE latent (same forward as 1stage)...")
-    for chunk_idx, batch in enumerate(tqdm(loader, desc="Save latent")):
+    if accelerator.is_main_process:
+        print("Saving AE latent (same forward as 1stage)...")
+    for chunk_idx, batch in enumerate(tqdm(loader, desc=f"Save latent r{rank}", disable=not accelerator.is_main_process)):
         if batch is None:
             continue
         teacher_hidden = batch["teacher_hidden"].float()
@@ -190,24 +210,34 @@ def main():
         z_np = z.cpu().numpy().astype(np.float32)
         y_np = y_token.cpu().numpy()
 
-        chunk_path = os.path.join(args.save_dir, f"latent_chunk_{chunk_idx:06d}.npz")
+        chunk_path = os.path.join(save_dir_rank, f"latent_chunk_{chunk_idx:06d}.npz")
         np.savez_compressed(chunk_path, z=z_np, y_token=y_np)
         chunk_list.append({"path": os.path.basename(chunk_path), "n": int(z_np.shape[0])})
         total_tokens += z_np.shape[0]
 
-    meta = {
-        "num_chunks": len(chunk_list),
-        "latent_dim": args.latent_dim,
-        "total_tokens": total_tokens,
-        "data_fraction": args.data_fraction,
-        "max_length": args.max_length,
-        "chunks": chunk_list,
-    }
-    with open(os.path.join(args.save_dir, "meta.json"), "w") as f:
-        json.dump(meta, f, indent=2)
+    # Gather total_tokens for global meta (rank 0 writes)
+    if world_size > 1:
+        total_tokens_t = torch.tensor([total_tokens], dtype=torch.long, device=device)
+        from torch.distributed import all_reduce
+        all_reduce(total_tokens_t, op=torch.distributed.ReduceOp.SUM)
+        total_tokens_all = total_tokens_t.item()
+    else:
+        total_tokens_all = total_tokens
 
-    print(f"Done. Saved {total_tokens} tokens in {len(chunk_list)} chunks under {args.save_dir}")
-    print(f"  meta.json: num_chunks={meta['num_chunks']}, latent_dim={meta['latent_dim']}, total_tokens={meta['total_tokens']}")
+    if accelerator.is_main_process:
+        meta = {
+            "num_ranks": world_size,
+            "latent_dim": args.latent_dim,
+            "total_tokens": total_tokens_all,
+            "data_fraction": args.data_fraction,
+            "max_length": args.max_length,
+            "rank_dirs": [f"rank_{r}" for r in range(world_size)] if world_size > 1 else ["."],
+        }
+        os.makedirs(args.save_dir, exist_ok=True)
+        with open(os.path.join(args.save_dir, "meta.json"), "w") as f:
+            json.dump(meta, f, indent=2)
+        print(f"Done. Saved {total_tokens_all} tokens total ({world_size} rank(s)) under {args.save_dir}")
+        print(f"  meta.json: latent_dim={meta['latent_dim']}, total_tokens={meta['total_tokens']}")
 
 
 if __name__ == "__main__":

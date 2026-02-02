@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data_utils.indexed_dataset import MMapIndexedDataset
 from data_utils.sparse_sampler import SparseLogitSampler, TopKSampler
+from data_utils.bin_fingerprint import compute_data_fingerprint
 
 
 def parse_args():
@@ -526,6 +527,9 @@ def main():
         sampler_sparse = SparseLogitSampler(num_samples=args.num_samples)
         print(f"Using Random Sampling (N={args.num_samples})")
     
+    # ★ 학습 시 bin과 캐시가 같은 데이터/순서인지 검증용 fingerprint
+    data_fingerprint = compute_data_fingerprint(args.data_dir, all_shard_sizes)
+
     # Save metadata (shard 정보 포함)
     metadata = {
         'method': args.method,
@@ -539,6 +543,7 @@ def main():
         'shard_sizes': all_shard_sizes,          # 각 shard의 크기
         'shard_offsets': global_offsets,         # 각 shard의 global offset
         'data_dir': args.data_dir,
+        'data_fingerprint': data_fingerprint,    # bin 정렬 검증용 (순서 다르면 대참사 방지)
         'pad_token_id': tokenizer.pad_token_id,  # ✅ 추가
     }
     

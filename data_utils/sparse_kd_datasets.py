@@ -116,11 +116,60 @@ class SparseKDLMDataset(LMDataset):
         
         self.shard_paths = {get_shard_id(p): p for p in npz_files}
         print_rank(f"   Found {len(self.shard_paths)} cached logits shards")
+        self._verify_data_alignment()
         
         # Build global_idx -> (shard_id, local_idx) mapping
         # (lazy loading을 위해 메타데이터만 저장)
         self.sparse_logits_loaded = True
-    
+
+    def _verify_data_alignment(self):
+        """샘플 하나씩 불러서 bin의 next-token이 캐시 sparse token_ids에 있는지로 정렬 맞는지 검증."""
+        n_test = 5
+        test_indices = [0, 1]
+        total_len = len(self.data)
+        for i in [10, 100, 1000]:
+            if i < total_len:
+                test_indices.append(i)
+        test_indices = test_indices[:n_test]
+        matches = 0
+        total_checks = 0
+        for idx in test_indices:
+            if idx >= total_len:
+                continue
+            try:
+                data = np.asarray(self.data[idx]).flatten().astype(np.int64)
+            except Exception:
+                continue
+            if len(data) < 2:
+                continue
+            labels = data[1:]
+            shard_id, local_idx = self._get_shard_and_local_idx(idx)
+            shard_data = self._load_shard_logits(shard_id)
+            if self.logits_method == 'both':
+                key = 'topk_token_ids' if self.use_method == 'topk' else 'sparse_token_ids'
+                cached_ids = np.asarray(shard_data[key][local_idx])
+            else:
+                cached_ids = np.asarray(shard_data['token_ids'][local_idx])
+            slen = min(len(labels), cached_ids.shape[0], 10)
+            for pos in range(slen):
+                gt = int(labels[pos])
+                row = cached_ids[pos, :]
+                valid = row[row >= 0]
+                if len(valid) and gt in valid:
+                    matches += 1
+                total_checks += 1
+        if total_checks < 3:
+            print_rank("   ⚠️ Cache alignment: 샘플 검증 스킵 (데이터 부족)")
+            return
+        ratio = matches / total_checks
+        if ratio < 0.2:
+            raise RuntimeError(
+                f"[캐시 정렬 검증 실패] 샘플 {total_checks}개 중 {matches}개만 일치 (비율 {ratio:.2f}).\n"
+                "bin과 캐시가 다른 데이터/순서일 가능성 큼. 같은 bin으로 만든 캐시를 쓰거나 "
+                "데이터 순서를 맞춰주세요."
+            )
+        print_rank(f"   ✅ Cache alignment OK (샘플 {total_checks}개 중 {matches}개 일치, 비율 {ratio:.2f})")
+
     def _get_shard_and_local_idx(self, global_idx: int) -> Tuple[int, int]:
         """
         Global index로부터 shard_id와 local_idx 찾기 (Binary search)
@@ -207,18 +256,22 @@ class SparseKDLMDataset(LMDataset):
         
         idx, data = result
         
+        # DistributedMMapIndexedDataset 사용 시 idx는 rank별 로컬 인덱스.
+        # 캐시 logits는 전역 인덱스 기준이므로 min_offset을 더해 전역 인덱스로 변환.
+        global_idx = idx + getattr(self.data, "min_offset", 0)
+        
         # Cached logits 로드
         sparse_logits = None
         if self.sparse_logits_loaded:
             try:
-                shard_id, local_idx = self._get_shard_and_local_idx(idx)
+                shard_id, local_idx = self._get_shard_and_local_idx(global_idx)
                 shard_data = self._load_shard_logits(shard_id)
                 
                 # Bounds check
                 if local_idx < 0 or local_idx >= len(shard_data['seq_lens']):
                     raise IndexError(
                         f"local_idx={local_idx} out of range [0, {len(shard_data['seq_lens'])}) "
-                        f"for shard_id={shard_id}, global_idx={idx}"
+                        f"for shard_id={shard_id}, global_idx={global_idx}"
                     )
                 
                 # 해당 시퀀스의 sparse logits 추출
@@ -259,7 +312,7 @@ class SparseKDLMDataset(LMDataset):
                 
             except (KeyError, IndexError, ValueError) as e:
                 print_rank(
-                    f"⚠️ Failed to load sparse logits: global_idx={idx}, "
+                    f"⚠️ Failed to load sparse logits: global_idx={global_idx}, "
                     f"shard_id={shard_id if 'shard_id' in locals() else 'unknown'}, "
                     f"local_idx={local_idx if 'local_idx' in locals() else 'unknown'}, "
                     f"error={type(e).__name__}: {e}"

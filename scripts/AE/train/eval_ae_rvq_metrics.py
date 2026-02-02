@@ -181,31 +181,47 @@ def compute_metrics(teacher_hidden, recon_hidden, teacher_model, temperature=1.0
 def load_ae_model(checkpoint_path, teacher_model, latent_dim, device):
     from train_ae_onthefly import ConditionalAutoEncoder
 
-    teacher_embed = None
-    if hasattr(teacher_model, "transformer") and hasattr(teacher_model.transformer, "wte"):
-        teacher_embed = teacher_model.transformer.wte
-    elif hasattr(teacher_model, "model") and hasattr(teacher_model.model, "embed_tokens"):
-        teacher_embed = teacher_model.model.embed_tokens
-    elif hasattr(teacher_model, "get_input_embeddings"):
-        teacher_embed = teacher_model.get_input_embeddings()
-
-    if hasattr(teacher_model.config, "n_embd"):
-        input_dim = teacher_model.config.n_embd
-    elif hasattr(teacher_model.config, "hidden_size"):
-        input_dim = teacher_model.config.hidden_size
-    else:
-        input_dim = 4096
-
+    teacher_embed = _get_teacher_embed(teacher_model)
+    input_dim = _get_teacher_hidden_dim(teacher_model)
     ae = ConditionalAutoEncoder(input_dim=input_dim, latent_dim=latent_dim, teacher_embed=teacher_embed)
+    _load_ae_state(ae, checkpoint_path, device)
+    return ae, input_dim
+
+
+def load_ae_zonly_model(checkpoint_path, teacher_model, latent_dim, device):
+    from train_ae_zonly import ConditionalAutoEncoderZOnly
+
+    teacher_embed = _get_teacher_embed(teacher_model)
+    input_dim = _get_teacher_hidden_dim(teacher_model)
+    ae = ConditionalAutoEncoderZOnly(input_dim=input_dim, latent_dim=latent_dim, teacher_embed=teacher_embed)
+    _load_ae_state(ae, checkpoint_path, device)
+    return ae, input_dim
+
+
+def _get_teacher_embed(teacher_model):
+    if hasattr(teacher_model, "transformer") and hasattr(teacher_model.transformer, "wte"):
+        return teacher_model.transformer.wte
+    if hasattr(teacher_model, "model") and hasattr(teacher_model.model, "embed_tokens"):
+        return teacher_model.model.embed_tokens
+    return teacher_model.get_input_embeddings()
+
+
+def _get_teacher_hidden_dim(teacher_model):
+    if hasattr(teacher_model.config, "n_embd"):
+        return teacher_model.config.n_embd
+    if hasattr(teacher_model.config, "hidden_size"):
+        return teacher_model.config.hidden_size
+    return 4096
+
+
+def _load_ae_state(ae, checkpoint_path, device):
     state = torch.load(checkpoint_path, map_location="cpu")
-    # drop keys that may come from buffer (y_embed_weight) if not in state
     ae_state = {k: v for k, v in state.items() if k in ae.state_dict()}
     if not ae_state and "y_embed_weight" not in state:
         ae_state = state
     ae.load_state_dict(ae_state, strict=False)
     ae.to(device)
     ae.eval()
-    return ae, input_dim
 
 
 # ------------------------------------------------------------------------------
@@ -349,6 +365,10 @@ def run_eval(args):
         model, input_dim = load_ae_model(args.checkpoint_path, teacher, args.latent_dim, device)
         use_y = True
         is_emb = False
+    elif args.model_type == "ae_zonly":
+        model, input_dim = load_ae_zonly_model(args.checkpoint_path, teacher, args.latent_dim, device)
+        use_y = True  # encoder still uses y; decoder uses z only
+        is_emb = False
     else:
         # Check if it's rvq_emb model (from filename or explicit flag)
         is_emb = parsed_params.get('is_emb', False) if parsed_params else False
@@ -397,7 +417,7 @@ def run_eval(args):
         y_token = batch.get("y_token")
 
         with torch.no_grad():
-            if args.model_type == "ae":
+            if args.model_type in ("ae", "ae_zonly"):
                 recon_hidden, _ = model(hidden, y_token=y_token)
             elif is_emb:
                 # rvq_emb needs token embeddings (y_token -> embedding lookup)
@@ -485,7 +505,7 @@ def run_eval(args):
 
 def main():
     p = argparse.ArgumentParser(description="Eval AE / RVQ: logit MSE/KL, hidden MSE/cosine")
-    p.add_argument("--model_type", type=str, choices=["ae", "rvq"], required=True)
+    p.add_argument("--model_type", type=str, choices=["ae", "ae_zonly", "rvq"], required=True)
     p.add_argument("--checkpoint_path", type=str, required=True)
     p.add_argument("--teacher_path", type=str, required=True)
     p.add_argument("--data_path", type=str, required=True)

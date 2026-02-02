@@ -30,13 +30,35 @@ from glob import glob
 from typing import Dict, Optional, Tuple
 from collections import OrderedDict
 
+from torch.distributed import get_rank, get_world_size, is_initialized
+
 from utils import print_rank
 from .lm_datasets import LMDataset
+from .distributed_indexed_rank_split import DistributedMMapIndexedDataset as DistributedMMapIndexedDatasetRankSplit
 
 
 class SparseKDLMDatasetHDF5(LMDataset):
-    """HDF5 (v3: token_offsets) 기반 Dataset"""
-    
+    """HDF5 (v3: token_offsets) 기반 Dataset. bin 데이터는 rank별 min_offset 자동 분배 버전 사용."""
+
+    def load_data_bin(self, data_path, **kwargs):
+        """rank별 min_offset을 자동 계산하는 DistributedMMapIndexedDataset 사용 (offline_kd용)."""
+        r = get_rank() if is_initialized() else 0
+        n = get_world_size() if is_initialized() else 1
+        data = DistributedMMapIndexedDatasetRankSplit(
+            data_path, f"{self.split}", r, n,
+            min_state=kwargs.get("min_state", 0),
+            max_state=kwargs.get("max_state", None),
+            min_offset=kwargs.get("min_offset", 0),
+            max_offset=kwargs.get("max_offset", None),
+            do_probe=kwargs.get("do_probe", True),
+        )
+        return data
+
+    @property
+    def global_len(self):
+        """Epoch/step 계산용: rank 분할 시 전체 샘플 수 (self.data.total_length)."""
+        return getattr(self.data, "total_length", len(self.data))
+
     def __init__(
         self, 
         args, 
@@ -57,6 +79,9 @@ class SparseKDLMDatasetHDF5(LMDataset):
         self.hdf5_files = OrderedDict()  # shard_id -> h5py.File (LRU)
         self.max_cache_size = 1  # 최대 1개 shard 파일만 열어둠
         self.sparse_logits_loaded = False
+        # 디버깅: DEBUG_GETITEM=1 또는 dataset._debug_getitem=True, _debug_getitem_limit=10
+        self._debug_getitem = os.environ.get("DEBUG_GETITEM", "").strip() in ("1", "true", "yes")
+        self._debug_getitem_limit = int(os.environ.get("DEBUG_GETITEM_LIMIT", "10"))
         
         if cached_logits_dir is not None:
             self._load_hdf5_metadata()
@@ -234,14 +259,43 @@ class SparseKDLMDatasetHDF5(LMDataset):
             return None
         
         idx, data = result
+        min_offset = getattr(self.data, "min_offset", 0)
+        global_idx = idx + min_offset
         
         sparse_logits = None
         if self.sparse_logits_loaded:
             try:
-                shard_id, local_idx = self._get_shard_and_local_idx(idx)
+                shard_id, local_idx = self._get_shard_and_local_idx(global_idx)
                 sparse_logits = self._read_sparse_logits(shard_id, local_idx)
             except Exception as e:
-                print_rank(f"⚠️ idx={idx}: {e}")
+                print_rank(f"⚠️ idx={idx} (global={global_idx}): {e}")
+        
+        # 디버깅: KD loss 높을 때 vs 낮을 때 비교용 (rank 0, 처음 N개만)
+        if getattr(self, "_debug_getitem", False):
+            import torch.distributed as dist
+            rank = dist.get_rank() if dist.is_initialized() else 0
+            debug_limit = getattr(self, "_debug_getitem_limit", 10)
+            if idx < debug_limit:
+                tokens_preview = data[:10].tolist() if hasattr(data, "tolist") else data[:10]
+                msg = (
+                    f"[DEBUG __getitem__] rank={rank} local_idx={idx} min_offset={min_offset} "
+                    f"global_idx={global_idx} | data.shape={getattr(data, 'shape', len(data))} "
+                    f"input_tokens[:10]={tokens_preview}"
+                )
+                print(msg)
+                if sparse_logits is not None:
+                    sl = sparse_logits
+                    seq_len = sl.get("seq_len", 0)
+                    method = sl.get("method", "?")
+                    k = sl["token_ids"].shape[1] if "token_ids" in sl else 0
+                    # 첫 3 스텝만 샘플 (KD loss 비교용)
+                    t_show = min(3, seq_len)
+                    ids_show = sl["token_ids"][:t_show].tolist() if t_show else []
+                    val_show = sl["values"][:t_show].tolist() if t_show else []
+                    print(
+                        f"[DEBUG sparse_logits] seq_len={seq_len} method={method} k={k} | "
+                        f"token_ids[:{t_show}]={ids_show} values[:{t_show}]={val_show}"
+                    )
         
         return idx, data, sparse_logits
     
