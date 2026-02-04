@@ -13,7 +13,7 @@ GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 # Edit this list to choose which checkpoints to evaluate.
 # Only the paths listed here will be run.
 MODELS=(
-  "/home/jiwonyoon/data1/projects/MiniPLM/results/pretrain/miniplm_refined_corpus/qwen_200M-2stage-sft/t100K-w2K-bs64-lr0.0006cosine6e-05-G1-N8-NN1/90000"
+  "/home/jiwonyoon/data1/projects/MiniPLM/results/vanilla_kd/miniplm_refined_corpus/qwen_200M/t100K-w2K-bs16-lr0.0006cosine6e-05-G4-N8-NN1-scr/7B-kd0.5/100000"
 )
 
 if [ ${#MODELS[@]} -eq 0 ]; then
@@ -31,7 +31,7 @@ DISTRIBUTED_ARGS=(
 
 TYPE="eval_harness"
 DATA_NAME="end_tasks"
-EVAL_DATA_NAMES="piqa"
+EVAL_DATA_NAMES="hellaswag"
 EVAL_BATCH_SIZE=${EVAL_BATCH_SIZE:-64}
 SEED=${SEED:-10}
 

@@ -21,7 +21,7 @@ BASE_PATH="${BASE_PATH:-"$(cd "${SCRIPT_DIR}/../.." && pwd)"}"
 # 11: harness
 # ============================================
 # 예시: TASK_NUMS="1" 또는 TASK_NUMS="1,3,5" (여러 개 선택 가능)
-TASK_NUMS="1"  # ← 여기 숫자만 수정하세요! (쉼표로 여러 개 선택 가능)
+TASK_NUMS="1,2,3,4,5,6,7,9,10,11"  # ← 여기 숫자만 수정하세요! (쉼표로 여러 개 선택 가능)
 
 # ============================================
 # Configuration: Select model checkpoint(s)
@@ -34,13 +34,15 @@ TASK_NUMS="1"  # ← 여기 숫자만 수정하세요! (쉼표로 여러 개 선
 # ============================================
 MODELS=(
   # "/home/jiwonyoon/data1/projects/MiniPLM/results/offline_kd/sparse_kd/qwen_200M/t100K-w2K-bs32-lr0.0006cosine6e-05-G2-N8-NN1-scr/offline-topk-a0.5/100000"
-  # "/home/jiwonyoon/data1/projects/MiniPLM/results/offline_kd/sparse_kd/qwen_500M/t100K-w2K-bs32-lr0.0003cosine3e-05-G2-N8-NN1-scr/offline-topk-a0.5/100000"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/results/offline_kd/sparse_kd/qwen_200M-2stage-sparse-from-1stage/t100K-w2K-bs32-lr0.0006cosine6e-05-G2-N8-NN1/offline-topk-a0.5/100000"
   # "/home/jiwonyoon/data1/projects/MiniPLM/results/offline_kd/topk/qwen_200M/t100K-w2K-bs32-lr0.0006cosine6e-05-G2-N8-NN1-scr/offline-topk-a0.5/100000"
-  # "/home/jiwonyoon/data1/projects/MiniPLM/results/pretrain/qwen_1.2B/t100K-w2K-bs32-lr0.00025cosine2.5e-05-G2-N8-NN1-scr/100000"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/results/offline_kd/topk/qwen_200M-2stage-topk-from-1stage/t100K-w2K-bs32-lr0.0006cosine6e-05-G2-N8-NN1/offline-topk-a0.5/100000"
   # "/home/jiwonyoon/data1/projects/MiniPLM/results/pretrain/qwen_200M/t100K-w2K-bs64-lr0.0006cosine6e-05-G1-N8-NN1-scr/100000"
   # "/home/jiwonyoon/data1/projects/MiniPLM/results/pretrain/qwen_500M/t100K-w2K-bs32-lr0.0006cosine6e-05-G2-N8-NN1-scr/100000"
-  # "/home/jiwonyoon/data1/projects/MiniPLM/results/vanilla_kd/miniplm_refined_corpus/qwen_200M/t100K-w2K-bs16-lr0.0006cosine6e-05-G4-N8-NN1-scr/7B-kd0.5/100000"
-  "/home/jiwonyoon/data1/projects/MiniPLM/results/pretrain/miniplm_refined_corpus/qwen_200M-2stage-sft/t100K-w2K-bs64-lr0.0006cosine6e-05-G1-N8-NN1/90000"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/results/pretrain/qwen_1.2B/t100K-w2K-bs32-lr0.00025cosine2.5e-05-G2-N8-NN1-scr/100000"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/results/pretrain/miniplm_refined_corpus/qwen_200M-2stage-sft/t100K-w2K-bs64-lr0.0006cosine6e-05-G1-N8-NN1/100000"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/results/vanilla_kd/miniplm_refined_corpus/qwen_200M-2stage-from-1stage/t100K-w2K-bs16-lr0.0006cosine6e-05-G4-N8-NN1/7B-kd0.5/100000"
+  "/home/jiwonyoon/data1/projects/MiniPLM/results/vanilla_kd/miniplm_refined_corpus/qwen_200M/t100K-w2K-bs16-lr0.0006cosine6e-05-G4-N8-NN1-scr/7B-kd0.5/100000"
 )
 
 # ============================================
