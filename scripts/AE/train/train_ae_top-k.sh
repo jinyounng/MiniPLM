@@ -30,13 +30,13 @@ MAX_LENGTH=${9-1024}
 # Loss weights
 ALPHA_MSE=${10-0.0}
 ALPHA_COSINE=${11-0.0}
-ALPHA_LOGIT=${12-1.0}
-ALPHA_LOGIT_MSE=${13-0.0}
+ALPHA_LOGIT=${12-0.0}
+ALPHA_LOGIT_MSE=${13-1.0}
 
 # Top-K logit: 로짓 로스에 teacher 상위 K개만 사용. 비우면 full vocab.
 # 예: 5000, 2000, 10000
 TOPK_LOGIT=${14-5000}
-OUTPUT_DIR="${BASE_PATH}/checkpoints/AE/topk_logit/layernorm/topk_${TOPK_LOGIT}"
+OUTPUT_DIR="${BASE_PATH}/checkpoints/AE/topk_logit/layernorm/topk_${TOPK_LOGIT}/logit_mse_1.0"
 
 export PYTHONPATH=${BASE_PATH}
 

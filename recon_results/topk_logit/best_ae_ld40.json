@@ -1,0 +1,9 @@
+{
+  "logit_mse": 18.47851847313289,
+  "logit_kl": 0.8864966951659269,
+  "hidden_mse": 26.26183511689179,
+  "hidden_cosine": 0.34326575126175707,
+  "num_samples": 1023660,
+  "checkpoint_path": "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/topk_logit/layernorm/topk_5000/logit_only/best_ae_ld40.pt",
+  "model_type": "ae"
+}

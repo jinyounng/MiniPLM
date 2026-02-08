@@ -14,14 +14,16 @@ set -e
 # EVAL_LATENT_DIMS: ae/ae_zonly용 latent_dim (개수 맞추거나 비우면 파일명/기본값으로 추론)
 # -----------------------------------------------------------------------------
 EVAL_CKPTS=(
-  "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/logit_only/layernorm/best_ae_ld25.pt"
-  "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/logit_only/layernorm/best_ae_ld40.pt"
-  "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/zonly/best_ae_zonly_ld25.pt"
-  "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/zonly/best_ae_zonly_ld40.pt"
-  "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/RVQ/best_rvq_s25_c1024_d1024_enc3_dec3.pt"
-  "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/RVQ/best_rvq_s25_c1024_d1024_enc4_dec4.pt"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/logit_only/layernorm/best_ae_ld25.pt"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/logit_only/layernorm/best_ae_ld40.pt"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/zonly/best_ae_zonly_ld25.pt"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/zonly/best_ae_zonly_ld40.pt"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/RVQ/best_rvq_s25_c1024_d1024_enc3_dec3.pt"
+  # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/RVQ/best_rvq_s25_c1024_d1024_enc4_dec4.pt"
+  #"/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/topk_logit/layernorm/topk_5000/logit_mse_1.0/best_ae_ld40.pt"
+  "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/topk_logit/layernorm/topk_5000/logit_only/best_ae_ld40.pt"
 )
-EVAL_LATENT_DIMS=(25 40 25 40 25 25)   # 비우면 () → 각 ckpt마다 기본값/파일명 사용
+EVAL_LATENT_DIMS=(40 40)   # 비우면 () → 각 ckpt마다 기본값/파일명 사용
 
 # -----------------------------------------------------------------------------
 BASE_PATH=${BASE_PATH:-/home/jiwonyoon/data1/projects/MiniPLM}
