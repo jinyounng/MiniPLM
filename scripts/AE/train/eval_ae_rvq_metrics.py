@@ -4,6 +4,7 @@ Eval script: Codebook(RVQ) / AE 모델의 hidden → logits 복원 품질 평가
 Metrics:
   - Logit MSE: MSE(teacher_logits, recon_logits)
   - Logit KL:  KL(recon_logits || teacher_logits)
+  - Top-1 Accuracy: recon argmax == teacher argmax 비율
   - Hidden MSE: MSE(teacher_hidden, recon_hidden)
   - Hidden Cosine: cosine_similarity(teacher_hidden, recon_hidden)
 
@@ -148,7 +149,7 @@ def collate_hidden_and_y(batch_indices, dataset, teacher_model, device, max_leng
 def compute_metrics(teacher_hidden, recon_hidden, teacher_model, temperature=1.0):
     """
     teacher_hidden, recon_hidden: [N, H]
-    Returns: dict with logit_mse, logit_kl, hidden_mse, hidden_cosine
+    Returns: dict with logit_mse, logit_kl, hidden_mse, hidden_cosine, top1_accuracy
     """
     with torch.no_grad():
         teacher_logits = get_lm_logits_from_hidden(teacher_model, teacher_hidden)
@@ -161,6 +162,10 @@ def compute_metrics(teacher_hidden, recon_hidden, teacher_model, temperature=1.0
         F.softmax(teacher_logits / temperature, dim=-1),
         reduction="batchmean",
     ).item() * (temperature ** 2)
+    # Top-1 logit accuracy: recon argmax == teacher argmax
+    teacher_top1 = teacher_logits.argmax(dim=-1)
+    recon_top1 = recon_logits.argmax(dim=-1)
+    top1_accuracy = (teacher_top1 == recon_top1).float().mean().item()
     # Hidden MSE
     hidden_mse = F.mse_loss(recon_hidden.float(), teacher_hidden.float()).item()
     # Hidden Cosine (per token, then mean). [N,H] -> similarity per row -> scalar
@@ -169,6 +174,7 @@ def compute_metrics(teacher_hidden, recon_hidden, teacher_model, temperature=1.0
     return {
         "logit_mse": logit_mse,
         "logit_kl": logit_kl,
+        "top1_accuracy": top1_accuracy,
         "hidden_mse": hidden_mse,
         "hidden_cosine": hidden_cosine,
     }
@@ -405,6 +411,7 @@ def run_eval(args):
     n_total = 0
     sum_logit_mse = 0.0
     sum_logit_kl = 0.0
+    sum_top1_accuracy = 0.0
     sum_hidden_mse = 0.0
     sum_hidden_cosine = 0.0
 
@@ -439,6 +446,7 @@ def run_eval(args):
         n_total += n
         sum_logit_mse += m["logit_mse"] * n
         sum_logit_kl += m["logit_kl"] * n
+        sum_top1_accuracy += m["top1_accuracy"] * n
         sum_hidden_mse += m["hidden_mse"] * n
         sum_hidden_cosine += m["hidden_cosine"] * n
 
@@ -449,6 +457,7 @@ def run_eval(args):
     # Calculate averages
     avg_logit_mse = sum_logit_mse / n_total
     avg_logit_kl = sum_logit_kl / n_total
+    avg_top1_accuracy = sum_top1_accuracy / n_total
     avg_hidden_mse = sum_hidden_mse / n_total
     avg_hidden_cosine = sum_hidden_cosine / n_total
 
@@ -456,6 +465,7 @@ def run_eval(args):
     results = {
         "logit_mse": avg_logit_mse,
         "logit_kl": avg_logit_kl,
+        "top1_accuracy": avg_top1_accuracy,
         "hidden_mse": avg_hidden_mse,
         "hidden_cosine": avg_hidden_cosine,
         "num_samples": n_total,
@@ -496,6 +506,7 @@ def run_eval(args):
     print("=" * 60, flush=True)
     print(f"  Logit MSE:        {avg_logit_mse:.6f}", flush=True)
     print(f"  Logit KL div:     {avg_logit_kl:.6f}", flush=True)
+    print(f"  Top-1 Accuracy:   {avg_top1_accuracy:.4f} ({avg_top1_accuracy*100:.2f}%)", flush=True)
     print(f"  Hidden MSE:       {avg_hidden_mse:.6f}", flush=True)
     print(f"  Hidden Cosine:    {avg_hidden_cosine:.6f}", flush=True)
     print("=" * 60, flush=True)

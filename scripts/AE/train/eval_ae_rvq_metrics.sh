@@ -1,5 +1,5 @@
 #!/bin/bash
-# Eval AE / RVQ: hidden → logits 복원 품질 (Logit MSE/KL, Hidden MSE/Cosine)
+# Eval AE / RVQ: hidden → logits 복원 품질 (Logit MSE/KL, Top-1 Accuracy, Hidden MSE/Cosine)
 #
 # (1) bash 파일 안에서 여러 모델 지정해서 한 번에 평가:
 #     아래 EVAL_CKPTS / EVAL_LATENT_DIMS 수정 후 인자 없이 실행
@@ -15,7 +15,7 @@ set -e
 # -----------------------------------------------------------------------------
 EVAL_CKPTS=(
   # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/logit_only/layernorm/best_ae_ld25.pt"
-  # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/logit_only/layernorm/best_ae_ld40.pt"
+  "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/logit_only/layernorm/best_ae_ld40.pt"
   # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/zonly/best_ae_zonly_ld25.pt"
   # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/zonly/best_ae_zonly_ld40.pt"
   # "/home/jiwonyoon/data1/projects/MiniPLM/checkpoints/AE/RVQ/best_rvq_s25_c1024_d1024_enc3_dec3.pt"
